@@ -1,4 +1,4 @@
-const CACHE = 'life-os-v0.3.1';
+const CACHE = 'life-os-v0.3';
 const ASSETS = ['./','./index.html','./styles.css','./app.js','./scheduler.js','./manifest.webmanifest','./apple-touch-icon.png','./icon-192.png','./icon-512.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS))));
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
