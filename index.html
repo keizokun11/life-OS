@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Life OS" />
   <link rel="manifest" href="./manifest.webmanifest" />
-  <title>Life OS v0.2</title>
+  <title>Life OS v0.4</title>
   <link rel="stylesheet" href="./styles.css" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
@@ -27,12 +27,14 @@
     <nav class="tabs">
       <button data-tab="today" class="active">今日</button>
       <button data-tab="tasks">課題</button>
+      <button data-tab="history">記録</button>
       <button data-tab="settings">設定</button>
     </nav>
 
     <main>
       <section id="todayTab" class="tab-panel"></section>
       <section id="tasksTab" class="tab-panel hidden"></section>
+      <section id="historyTab" class="tab-panel hidden"></section>
       <section id="settingsTab" class="tab-panel hidden"></section>
     </main>
   </div>

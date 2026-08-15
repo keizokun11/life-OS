@@ -161,9 +161,9 @@ function placeTask(task, minutes, blocks) {
   return items;
 }
 
-export function generateDayPlan({ day, tasks, events, overrides, settings }) {
+export function generateDayPlan({ day, tasks, events, overrides, settings, classDayOverride = 'auto' }) {
   const dayEvents = eventsForDay(events, day);
-  const classDay = isClassDay(dayEvents, settings);
+  const classDay = classDayOverride === 'class' ? true : classDayOverride === 'noClass' ? false : isClassDay(dayEvents, settings);
   const wake = toMinutes(settings.wakeTime);
   let bed = toMinutes(settings.bedTime);
   if (bed <= wake) bed += 1440;

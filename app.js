@@ -13,6 +13,9 @@ let tasks = load('tasks', []);
 let events = load('events', []);
 let overrides = load('overrides', {});
 let settings = deepDefaults(load('settings', DEFAULT_SETTINGS));
+let dayModes = load('dayModes', {});
+let activityLog = load('activityLog', []);
+let planSnapshots = load('planSnapshots', {});
 let selectedDay = dateKey();
 let accessToken = '';
 let accessTokenExpiresAt = 0;
@@ -53,7 +56,7 @@ window.lifeOSReceiveCalendarEvents = (incoming) => {
 window.lifeOSNativeNotice = (text) => notice(text);
 
 function persist() {
-  save('tasks', tasks); save('events', events); save('overrides', overrides); save('settings', settings);
+  save('tasks', tasks); save('events', events); save('overrides', overrides); save('settings', settings); save('dayModes', dayModes); save('activityLog', activityLog); save('planSnapshots', planSnapshots);
 }
 
 function notice(text) {
@@ -63,11 +66,101 @@ function notice(text) {
 }
 
 function render() {
-  renderToday(); renderTasks(); renderSettings();
+  renderToday(); renderTasks(); renderHistory(); renderSettings();
+}
+
+function saveTodaySnapshot(plan, manualMode) {
+  if (selectedDay !== dateKey()) return;
+  planSnapshots[selectedDay] = {
+    date: selectedDay,
+    updatedAt: new Date().toISOString(),
+    manualMode,
+    classDay: plan.classDay,
+    scheduledTaskMinutes: Math.round(plan.scheduledTaskMinutes),
+    relaxedMinutes: Math.round(plan.relaxedMinutes),
+    rawFreeMinutes: Math.round(plan.rawFreeMinutes),
+    timeline: plan.timeline.map((x) => ({ type: x.type, taskId: x.taskId || null, title: x.title, start: Math.round(x.start), end: Math.round(x.end) })),
+  };
+  save('planSnapshots', planSnapshots);
+}
+
+function dayModeLabel(snapshot, date) {
+  const manual = snapshot?.manualMode || dayModes[date] || 'auto';
+  if (manual === 'class') return '授業日（手動）';
+  if (manual === 'noClass') return '授業なし日（手動）';
+  if (snapshot) return snapshot.classDay ? '授業日（自動）' : '授業なし日（自動）';
+  return '記録のみ';
+}
+
+function formatHistoryDate(day) {
+  return day.replaceAll('-', '/');
+}
+
+function renderHistory() {
+  const dates = [...new Set([...Object.keys(planSnapshots), ...activityLog.map((a) => a.date)])].sort().reverse();
+  const cards = dates.map((day) => {
+    const snap = planSnapshots[day];
+    const logs = activityLog.filter((a) => a.date === day).sort((a, b) => String(a.completedAt).localeCompare(String(b.completedAt)));
+    const completedTask = logs.filter((a) => a.kind === 'task').reduce((sum, a) => sum + Number(a.minutes || 0), 0);
+    const lifeLogs = logs.filter((a) => a.kind === 'life');
+    const entries = logs.map((a) => `<div class="history-entry"><span>${a.kind === 'life' ? '生活' : '作業'}</span><strong>${esc(a.title)}</strong><small>${minutesLabel(a.minutes || 0)} ・ ${new Date(a.completedAt).toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'})}</small></div>`).join('');
+    return `<div class="history-day">
+      <div class="row between"><div><strong class="history-date">${formatHistoryDate(day)}</strong><small class="history-mode">${esc(dayModeLabel(snap, day))}</small></div><span class="history-life ${lifeLogs.length ? 'done' : ''}">${lifeLogs.length ? '生活ケア完了' : '生活ケア記録なし'}</span></div>
+      <div class="history-metrics"><div><span>予定作業</span><strong>${minutesLabel(snap?.scheduledTaskMinutes || 0)}</strong></div><div><span>完了作業</span><strong>${minutesLabel(completedTask)}</strong></div><div><span>ゆったり予定</span><strong>${minutesLabel(snap?.relaxedMinutes || 0)}</strong></div></div>
+      <div class="history-entries">${entries || '<p class="muted">完了記録はありません。</p>'}</div>
+    </div>`;
+  }).join('');
+
+  $('historyTab').innerHTML = `<div class="stack">
+    <section class="card"><p class="eyebrow">HISTORY</p><h2>これまでの記録</h2><p class="muted">「完了」を押した作業・生活ケアと、その日の最新の達成予定を端末内に保存します。</p>
+      <div class="backup-actions"><button id="exportBackup" class="primary small">バックアップを書き出す</button><label class="file-button">バックアップを読み込む<input id="importBackup" type="file" accept="application/json,.json"></label></div>
+      <p class="muted">記録はこの端末のブラウザ内に保存されます。機種変更やデータ消去に備えて、ときどきJSONバックアップを書き出してください。</p>
+    </section>
+    <section class="card"><div class="history-list">${cards || '<p class="muted">まだ記録がありません。今日の予定で「完了」を押すとここに残ります。</p>'}</div></section>
+  </div>`;
+
+  $('exportBackup').addEventListener('click', exportBackup);
+  $('importBackup').addEventListener('change', importBackup);
+}
+
+function exportBackup() {
+  const data = {
+    version: '0.4', exportedAt: new Date().toISOString(),
+    tasks, events, overrides, settings, dayModes, activityLog, planSnapshots,
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `life-os-backup-${dateKey()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  notice('バックアップを書き出しました。');
+}
+
+async function importBackup(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || typeof data !== 'object') throw new Error('バックアップ形式が正しくありません。');
+    if (!confirm('現在のLife OSデータを、このバックアップの内容で置き換えますか？')) { e.target.value = ''; return; }
+    tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    events = Array.isArray(data.events) ? data.events : [];
+    overrides = data.overrides && typeof data.overrides === 'object' ? data.overrides : {};
+    settings = deepDefaults(data.settings || DEFAULT_SETTINGS);
+    dayModes = data.dayModes && typeof data.dayModes === 'object' ? data.dayModes : {};
+    activityLog = Array.isArray(data.activityLog) ? data.activityLog : [];
+    planSnapshots = data.planSnapshots && typeof data.planSnapshots === 'object' ? data.planSnapshots : {};
+    persist(); render(); updateGoogleButton(accessToken ? '接続済み' : '未接続'); notice('バックアップを復元しました。');
+  } catch (err) {
+    notice(`読み込めませんでした：${err.message}`);
+  } finally { e.target.value = ''; }
 }
 
 function renderToday() {
-  const plan = generateDayPlan({ day: selectedDay, tasks, events, overrides, settings });
+  const manualMode = dayModes[selectedDay] || 'auto';
+  const plan = generateDayPlan({ day: selectedDay, tasks, events, overrides, settings, classDayOverride: manualMode });
+  saveTodaySnapshot(plan, manualMode);
   const current = new Date();
   const nowMin = current.getHours() * 60 + current.getMinutes();
   const next = plan.timeline.find((x) => x.end > nowMin) || plan.timeline[0];
@@ -90,7 +183,12 @@ function renderToday() {
 
   const timeline = plan.timeline.map((x) => {
     const mins = x.end - x.start;
-    const done = x.taskId ? `<button class="done-btn" data-task-id="${x.taskId}" data-mins="${mins}">完了</button>` : '';
+    const completionKey = `${x.type}:${x.taskId || x.title}:${Math.round(x.start)}:${Math.round(x.end)}`;
+    const recorded = activityLog.some((a) => a.date === selectedDay && a.key === completionKey);
+    const canComplete = x.type === 'task' || x.type === 'life';
+    const done = canComplete ? (recorded
+      ? '<span class="done-mark">完了済み</span>'
+      : `<button class="done-btn" data-task-id="${esc(x.taskId || '')}" data-mins="${mins}" data-kind="${x.type}" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">完了</button>`) : '';
     return `<div class="timeline-item ${x.type}">
       <div class="time">${timeLabel(x.start)}<br><span>${timeLabel(x.end)}</span></div>
       <div class="timeline-body"><strong>${esc(x.title)}</strong><small>${minutesLabel(mins)}</small></div>${done}</div>`;
@@ -101,7 +199,7 @@ function renderToday() {
       <section class="hero-card">
         <div class="row between">
           <div><p class="eyebrow">TODAY</p><input id="dayPicker" class="date-input" type="date" value="${selectedDay}"></div>
-          <span class="mode-pill ${plan.classDay ? 'class' : ''}">${plan.classDay ? '授業日モード' : '授業なし日モード'}</span>
+          <label class="mode-select-wrap">日モード<select id="dayModeSelect" class="mode-select ${plan.classDay ? 'class' : ''}"><option value="auto" ${manualMode === 'auto' ? 'selected' : ''}>自動判定</option><option value="class" ${manualMode === 'class' ? 'selected' : ''}>授業日</option><option value="noClass" ${manualMode === 'noClass' ? 'selected' : ''}>授業なし日</option></select></label>
         </div>
         <div class="metrics">
           <div><span>予定した作業</span><strong>${minutesLabel(plan.scheduledTaskMinutes)}</strong></div>
@@ -116,9 +214,16 @@ function renderToday() {
     </div>`;
 
   $('dayPicker').addEventListener('change', (e) => { selectedDay = e.target.value; renderToday(); });
+  $('dayModeSelect').addEventListener('change', (e) => {
+    if (e.target.value === 'auto') delete dayModes[selectedDay];
+    else dayModes[selectedDay] = e.target.value;
+    persist(); renderToday(); renderHistory();
+  });
   document.querySelectorAll('.done-btn').forEach((b) => b.addEventListener('click', () => {
-    const id = b.dataset.taskId; const mins = Number(b.dataset.mins);
-    tasks = tasks.map((t) => t.id === id ? { ...t, remainingMinutes: Math.max(0, t.remainingMinutes - mins) } : t);
+    const id = b.dataset.taskId; const mins = Number(b.dataset.mins); const kind = b.dataset.kind;
+    if (activityLog.some((a) => a.date === selectedDay && a.key === b.dataset.key)) return;
+    if (kind === 'task' && id) tasks = tasks.map((t) => t.id === id ? { ...t, remainingMinutes: Math.max(0, t.remainingMinutes - mins) } : t);
+    activityLog.unshift({ id: uid(), date: selectedDay, completedAt: new Date().toISOString(), kind, taskId: id || null, title: b.dataset.title, minutes: mins, key: b.dataset.key });
     persist(); render();
   }));
 
