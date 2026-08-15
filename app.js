@@ -15,6 +15,8 @@ let overrides = load('overrides', {});
 let settings = deepDefaults(load('settings', DEFAULT_SETTINGS));
 let selectedDay = dateKey();
 let accessToken = '';
+let accessTokenExpiresAt = 0;
+const GOOGLE_SESSION_KEY = 'lifeos:googleAuthSession';
 
 const $ = (id) => document.getElementById(id);
 const isNativeIOS = () => Boolean(window.webkit?.messageHandlers?.lifeOSNative);
@@ -269,6 +271,46 @@ function updateGoogleButton(status = '未接続') {
   $('googleConnect').disabled = !settings.googleClientId;
 }
 
+async function fetchGoogleEvents() {
+  if (!accessToken) throw new Error('Google Calendarに接続されていません。');
+  const start = new Date(); start.setHours(0,0,0,0);
+  const end = new Date(start); end.setDate(end.getDate() + 30);
+  const params = new URLSearchParams({ timeMin: start.toISOString(), timeMax: end.toISOString(), singleEvents: 'true', orderBy: 'startTime', maxResults: '500' });
+  const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (res.status === 401) {
+    accessToken = '';
+    accessTokenExpiresAt = 0;
+    sessionStorage.removeItem(GOOGLE_SESSION_KEY);
+    updateGoogleButton('再接続が必要');
+    throw new Error('Googleの接続期限が切れました。右上から再接続してください。');
+  }
+  if (!res.ok) throw new Error(`Calendar API ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  events = (data.items || []).filter((e) => e.extendedProperties?.private?.lifeOSGenerated !== 'true').map((e) => {
+    const allDay = Boolean(e.start?.date && !e.start?.dateTime);
+    return { id: e.id, title: e.summary || '（無題）', allDay, start: allDay ? e.start.date : e.start?.dateTime, end: allDay ? e.end?.date : e.end?.dateTime, location: e.location || '' };
+  });
+  persist(); updateGoogleButton('接続済み'); renderToday();
+  return events.length;
+}
+
+function restoreGoogleSession() {
+  if (isNativeIOS()) return;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(GOOGLE_SESSION_KEY) || 'null');
+    if (!saved?.accessToken || !saved?.expiresAt || saved.expiresAt <= Date.now() + 60000) {
+      sessionStorage.removeItem(GOOGLE_SESSION_KEY);
+      return;
+    }
+    accessToken = saved.accessToken;
+    accessTokenExpiresAt = saved.expiresAt;
+    updateGoogleButton('接続済み');
+    fetchGoogleEvents().catch((e) => notice(e.message));
+  } catch {
+    sessionStorage.removeItem(GOOGLE_SESSION_KEY);
+  }
+}
+
 async function connectGoogle() {
   if (isNativeIOS()) {
     updateGoogleButton('接続中…');
@@ -278,27 +320,20 @@ async function connectGoogle() {
   if (!settings.googleClientId) return notice('設定画面でGoogle OAuth Web Client IDを入力してください。');
   try {
     if (!window.google?.accounts?.oauth2) throw new Error('Google Identity Servicesの読み込みが未完了です。数秒後にもう一度押してください。');
-    const token = await new Promise((resolve, reject) => {
+    const response = await new Promise((resolve, reject) => {
       const client = window.google.accounts.oauth2.initTokenClient({
         client_id: settings.googleClientId,
         scope: 'https://www.googleapis.com/auth/calendar.events',
-        callback: (r) => r.error ? reject(new Error(r.error)) : resolve(r.access_token),
+        callback: (r) => r.error ? reject(new Error(r.error)) : resolve(r),
       });
       client.requestAccessToken({ prompt: '' });
     });
-    accessToken = token;
+    accessToken = response.access_token;
+    accessTokenExpiresAt = Date.now() + Math.max(60, Number(response.expires_in || 3600)) * 1000;
+    sessionStorage.setItem(GOOGLE_SESSION_KEY, JSON.stringify({ accessToken, expiresAt: accessTokenExpiresAt }));
     updateGoogleButton('取得中…');
-    const start = new Date(); start.setHours(0,0,0,0);
-    const end = new Date(start); end.setDate(end.getDate() + 30);
-    const params = new URLSearchParams({ timeMin: start.toISOString(), timeMax: end.toISOString(), singleEvents: 'true', orderBy: 'startTime', maxResults: '500' });
-    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!res.ok) throw new Error(`Calendar API ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    events = (data.items || []).filter((e) => e.extendedProperties?.private?.lifeOSGenerated !== 'true').map((e) => {
-      const allDay = Boolean(e.start?.date && !e.start?.dateTime);
-      return { id: e.id, title: e.summary || '（無題）', allDay, start: allDay ? e.start.date : e.start?.dateTime, end: allDay ? e.end?.date : e.end?.dateTime, location: e.location || '' };
-    });
-    persist(); updateGoogleButton('接続済み'); renderToday(); notice(`${events.length}件の予定を取得しました。`);
+    const count = await fetchGoogleEvents();
+    notice(`${count}件の予定を取得しました。`);
   } catch (e) {
     updateGoogleButton('接続エラー'); notice(e.message);
   }
@@ -313,4 +348,4 @@ function setupTabs() {
 }
 
 $('googleConnect').addEventListener('click', connectGoogle);
-setupTabs(); updateGoogleButton(); render();
+setupTabs(); updateGoogleButton(); render(); restoreGoogleSession();
