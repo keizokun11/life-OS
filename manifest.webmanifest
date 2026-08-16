@@ -1,14 +1,1 @@
-{
-  "name": "Life OS",
-  "short_name": "Life OS",
-  "description": "予定・期限・余白から今日の達成予定を自動編成する生活OS",
-  "start_url": "./index.html",
-  "scope": "./",
-  "display": "standalone",
-  "background_color": "#f6f6f1",
-  "theme_color": "#f6f6f1",
-  "icons": [
-    {"src":"./icon-192.png","sizes":"192x192","type":"image/png"},
-    {"src":"./icon-512.png","sizes":"512x512","type":"image/png"}
-  ]
-}
+{"name":"Life OS","short_name":"Life OS","description":"学期時間割・授業課題・起床実績・睡眠予定・操作履歴・期限・余白・実績から今日の達成予定を自動編成する生活OS","start_url":"./index.html","scope":"./","display":"standalone","background_color":"#f6f6f1","theme_color":"#f6f6f1","icons":[{"src":"./icon-192.png","sizes":"192x192","type":"image/png"},{"src":"./icon-512.png","sizes":"512x512","type":"image/png"}]}

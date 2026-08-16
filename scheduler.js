@@ -12,6 +12,15 @@ export const DEFAULT_SETTINGS = {
   relaxedMinMinutes: 90,
   relaxedRatio: 0.20,
   classDayEveningCapMinutes: 60,
+  cloudSyncEnabled: true,
+  cloudFileName: 'life-os-data.json',
+  cloudLastSyncAt: '',
+  forecastDays: 90,
+  energy: {
+    high: { budgetMultiplier: 1.08, relaxedExtra: -10, blockCap: 150 },
+    normal: { budgetMultiplier: 1.0, relaxedExtra: 0, blockCap: 120 },
+    tired: { budgetMultiplier: 0.68, relaxedExtra: 45, blockCap: 45 },
+  },
   buffers: {
     none: { before: 0, after: 0 },
     small: { before: 15, after: 15 },
@@ -30,9 +39,17 @@ export function deepDefaults(saved = {}) {
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
+    energy: {
+      ...DEFAULT_SETTINGS.energy,
+      ...(saved.energy || {}),
+      high: { ...DEFAULT_SETTINGS.energy.high, ...(saved.energy?.high || {}) },
+      normal: { ...DEFAULT_SETTINGS.energy.normal, ...(saved.energy?.normal || {}) },
+      tired: { ...DEFAULT_SETTINGS.energy.tired, ...(saved.energy?.tired || {}) },
+    },
     buffers: {
       ...DEFAULT_SETTINGS.buffers,
       ...(saved.buffers || {}),
+      none: { ...DEFAULT_SETTINGS.buffers.none, ...(saved.buffers?.none || {}) },
       small: { ...DEFAULT_SETTINGS.buffers.small, ...(saved.buffers?.small || {}) },
       medium: { ...DEFAULT_SETTINGS.buffers.medium, ...(saved.buffers?.medium || {}) },
       large: { ...DEFAULT_SETTINGS.buffers.large, ...(saved.buffers?.large || {}) },
@@ -47,8 +64,14 @@ export function dateKey(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
+export function addDays(day, n) {
+  const d = new Date(`${day}T12:00:00`);
+  d.setDate(d.getDate() + n);
+  return dateKey(d);
+}
+
 export function toMinutes(text) {
-  const [h, m] = text.split(':').map(Number);
+  const [h, m] = String(text || '00:00').split(':').map(Number);
   return h * 60 + m;
 }
 
@@ -60,7 +83,7 @@ export function timeLabel(minute) {
 }
 
 export function minutesLabel(n) {
-  const v = Math.max(0, Math.round(n));
+  const v = Math.max(0, Math.round(n || 0));
   const h = Math.floor(v / 60);
   const m = v % 60;
   if (!h) return `${m}分`;
@@ -68,23 +91,27 @@ export function minutesLabel(n) {
   return `${h}時間${m}分`;
 }
 
-function dayStart(day) {
-  return new Date(`${day}T00:00:00`);
-}
-
-function eventMinute(dateString, day) {
-  return Math.round((new Date(dateString) - dayStart(day)) / MINUTE);
-}
+function dayStart(day) { return new Date(`${day}T00:00:00`); }
+function eventMinute(dateString, day) { return Math.round((new Date(dateString) - dayStart(day)) / MINUTE); }
 
 export function eventsForDay(events, day) {
-  return events.filter((e) => e.allDay ? e.start === day : dateKey(new Date(e.start)) === day);
+  return (events || []).filter((e) => e.allDay ? e.start === day : dateKey(new Date(e.start)) === day);
 }
 
-function inferBuffer(event, settings) {
-  if (event.bufferLevel && settings.buffers[event.bufferLevel]) return settings.buffers[event.bufferLevel];
+function inferBufferInfo(event, settings) {
+  if (event.bufferLevel && settings.buffers[event.bufferLevel]) return { level: event.bufferLevel, ...settings.buffers[event.bufferLevel] };
   const title = (event.title || '').toLowerCase();
-  const hit = settings.categoryRules.find((r) => r.keywords.some((k) => title.includes(k.toLowerCase())));
-  return settings.buffers[hit?.buffer || 'small'];
+  const hit = (settings.categoryRules || []).find((r) => (r.keywords || []).some((k) => title.includes(k.toLowerCase())));
+  const level = hit?.buffer || 'small';
+  return { level, ...settings.buffers[level] };
+}
+
+function resolveTimedEventBuffer(event, overrides, settings) {
+  const auto = inferBufferInfo(event, settings);
+  const ov = overrides?.[event.id];
+  if (ov?.kind === 'bufferCustom') return { selection: 'custom', autoLevel: auto.level, before: Math.max(0, Number(ov.before || 0)), after: Math.max(0, Number(ov.after || 0)), source: 'manual' };
+  if (ov?.kind === 'buffer' && settings.buffers[ov.bufferLevel]) return { selection: ov.bufferLevel, autoLevel: auto.level, ...settings.buffers[ov.bufferLevel], source: 'manual' };
+  return { selection: 'auto', autoLevel: auto.level, before: auto.before, after: auto.after, source: 'auto' };
 }
 
 function mergeIntervals(intervals) {
@@ -108,31 +135,50 @@ function freeIntervals(start, end, busy) {
     if (cursor >= end) break;
   }
   if (cursor < end) out.push({ start: cursor, end });
-  return out.filter((x) => x.end - x.start >= 15);
+  return out.filter((x) => x.end - x.start >= 10);
 }
 
-function daysUntil(deadline, day) {
+export function daysUntil(deadline, day) {
   const a = new Date(`${day}T12:00:00`);
-  const b = new Date(`${deadline.slice(0, 10)}T12:00:00`);
+  const b = new Date(`${String(deadline).slice(0,10)}T12:00:00`);
   return Math.max(1, Math.ceil((b - a) / 86_400_000));
 }
 
+export function isPageTask(task) { return Number.isFinite(Number(task?.remainingPages)); }
+export function taskMinutesPerPage(task) { return Math.max(0.25, Number(task?.learnedMinutesPerPage || task?.minutesPerPage || task?.baseMinutesPerPage || 3)); }
+export function estimatedRemainingMinutes(task) { return isPageTask(task) ? Math.max(0, Number(task.remainingPages || 0)) * taskMinutesPerPage(task) : Math.max(0, Number(task.remainingMinutes || 0)); }
+
 function urgency(task, day) {
   const d = daysUntil(task.deadline, day);
-  const priority = { high: 1.35, medium: 1, low: 0.75 }[task.priority] || 1;
-  const focus = { main: 1.45, sub: 1.05, maintain: 0.75 }[task.focus] || 1;
+  const priority = { high: 1.40, medium: 1, low: 0.72 }[task.priority] || 1;
+  const focus = { main: 1.50, sub: 1.06, maintain: 0.74 }[task.focus] || 1;
   const mode = task.mode === 'grow' ? 1.10 : 1;
-  return (task.remainingMinutes / d) * priority * focus * mode;
+  const fixedDateBoost = task.placement === 'date' && task.fixedDate === day ? 2.4 : 1;
+  return (estimatedRemainingMinutes(task) / d) * priority * focus * mode * fixedDateBoost;
 }
 
-function desiredToday(task, day, budget) {
-  if (task.remainingMinutes <= 0 || budget <= 0) return 0;
-  const baseline = task.remainingMinutes / daysUntil(task.deadline, day);
-  const mult = { main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1;
+function desiredTodayPages(task, day, budgetMinutes, loadMultiplier = 1) {
+  const remainingPages = Math.max(0, Number(task.remainingPages || 0));
+  if (remainingPages <= 0 || budgetMinutes <= 0) return 0;
+  const minutesPerPage = taskMinutesPerPage(task);
+  const baselinePages = remainingPages / daysUntil(task.deadline, day);
+  const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier;
+  const minPages = Math.max(1, Number(task.minPages || 5));
+  const maxPages = Math.max(minPages, Number(task.maxPages || 30));
+  const byBudget = Math.floor(budgetMinutes / minutesPerPage);
+  if (byBudget <= 0) return 0;
+  const target = Math.max(1, Math.ceil(baselinePages * mult));
+  return Math.min(remainingPages, byBudget, maxPages, Math.max(Math.min(minPages, byBudget), target));
+}
+
+function desiredTodayMinutes(task, day, budget, loadMultiplier = 1) {
+  if (Number(task.remainingMinutes || 0) <= 0 || budget <= 0) return 0;
+  const baseline = Number(task.remainingMinutes) / daysUntil(task.deadline, day);
+  const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier;
   const min = Number(task.minBlock || 20);
   const max = Number(task.maxBlock || 120);
   const target = Math.ceil((baseline * mult) / 5) * 5;
-  return Math.min(task.remainingMinutes, budget, max, Math.max(min, target));
+  return Math.min(Number(task.remainingMinutes), budget, max, Math.max(min, target));
 }
 
 function isClassDay(events, settings) {
@@ -140,30 +186,78 @@ function isClassDay(events, settings) {
   return events.some((e) => keywords.some((k) => (e.title || '').toLowerCase().includes(k.toLowerCase())));
 }
 
-function placeTask(task, minutes, blocks) {
-  const items = [];
-  let remaining = minutes;
+function orderedBlockIndexes(task, blocks) {
   const order = blocks.map((b, i) => ({ ...b, i }));
   if (task.timePreference === 'evening') order.sort((a, b) => b.start - a.start);
   else order.sort((a, b) => a.start - b.start);
+  return order;
+}
 
-  for (const candidate of order) {
+function placeMinuteTask(task, minutes, blocks, blockCap) {
+  const items = [];
+  let remaining = minutes;
+  for (const candidate of orderedBlockIndexes(task, blocks)) {
     if (remaining <= 0) break;
     const b = blocks[candidate.i];
     const cap = b.end - b.start;
     const min = Math.min(Number(task.minBlock || 20), remaining);
     if (cap < min) continue;
-    const chunk = Math.min(remaining, Number(task.maxBlock || 120), cap);
-    items.push({ type: 'task', taskId: task.id, title: task.title, start: b.start, end: b.start + chunk });
+    const chunk = Math.min(remaining, Number(task.maxBlock || 120), blockCap, cap);
+    items.push({ type: 'task', taskId: task.id, title: task.title, start: b.start, end: b.start + chunk, minutes: chunk, movable: true });
     blocks[candidate.i] = { start: b.start + chunk, end: b.end };
     remaining -= chunk;
   }
   return items;
 }
 
-export function generateDayPlan({ day, tasks, events, overrides, settings, classDayOverride = 'auto' }) {
-  const dayEvents = eventsForDay(events, day);
+function placePageTask(task, pages, blocks, blockCap) {
+  const items = [];
+  let remainingPages = pages;
+  const minutesPerPage = taskMinutesPerPage(task);
+  const minPages = Math.max(1, Number(task.minPages || 5));
+  const maxPages = Math.max(minPages, Number(task.maxPages || 30));
+  for (const candidate of orderedBlockIndexes(task, blocks)) {
+    if (remainingPages <= 0) break;
+    const b = blocks[candidate.i];
+    const capMinutes = Math.min(b.end - b.start, blockCap);
+    const pagesFit = Math.floor(capMinutes / minutesPerPage);
+    if (pagesFit <= 0) continue;
+    const requiredMinimum = Math.min(minPages, remainingPages);
+    if (pagesFit < requiredMinimum && items.length === 0 && pagesFit < remainingPages) continue;
+    const chunkPages = Math.max(1, Math.min(remainingPages, maxPages, pagesFit));
+    const chunkMinutes = Math.max(1, Math.ceil(chunkPages * minutesPerPage));
+    items.push({ type: 'task', taskId: task.id, title: task.title, start: b.start, end: b.start + chunkMinutes, pages: chunkPages, minutesPerPage, movable: true });
+    blocks[candidate.i] = { start: b.start + chunkMinutes, end: b.end };
+    remainingPages -= chunkPages;
+  }
+  return items;
+}
+
+function placementAllowsDay(task, day) {
+  if (task.placement === 'date' || task.placement === 'datetime') return task.fixedDate === day;
+  return true;
+}
+
+function fixedTaskItems(tasks, day) {
+  return tasks
+    .filter((t) => t.status !== 'paused' && t.placement === 'datetime' && t.fixedDate === day && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0))
+    .map((t) => {
+      const start = toMinutes(t.fixedTime || '09:00');
+      if (isPageTask(t)) {
+        const pages = Math.max(1, Math.min(Number(t.fixedPages || t.minPages || 5), Number(t.remainingPages || 0)));
+        const minutes = Math.max(1, Math.ceil(pages * taskMinutesPerPage(t)));
+        return { type: 'task', taskId: t.id, title: t.title, start, end: start + minutes, pages, minutesPerPage: taskMinutesPerPage(t), movable: false, fixed: true };
+      }
+      const minutes = Math.max(5, Math.min(Number(t.fixedMinutes || t.minBlock || 20), Number(t.remainingMinutes || 0)));
+      return { type: 'task', taskId: t.id, title: t.title, start, end: start + minutes, minutes, movable: false, fixed: true };
+    });
+}
+
+export function generateDayPlan({ day, tasks, events, overrides, settings, classDayOverride = 'auto', energyState = 'normal' }) {
+  settings = deepDefaults(settings);
+  const dayEvents = eventsForDay(events || [], day);
   const classDay = classDayOverride === 'class' ? true : classDayOverride === 'noClass' ? false : isClassDay(dayEvents, settings);
+  const energy = settings.energy?.[energyState] || settings.energy.normal;
   const wake = toMinutes(settings.wakeTime);
   let bed = toMinutes(settings.bedTime);
   if (bed <= wake) bed += 1440;
@@ -171,44 +265,45 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   const fixedCore = [];
   const busyForWork = [];
   const allDayPending = [];
+  const eventBufferInfo = [];
 
   for (const e of dayEvents) {
     if (e.allDay) {
-      const ov = overrides[e.id];
-      if (!ov) {
-        allDayPending.push(e);
-        continue;
-      }
+      const ov = overrides?.[e.id];
+      if (!ov) { allDayPending.push(e); continue; }
       if (ov.kind === 'memo') continue;
       if (ov.kind === 'timed') {
         const start = toMinutes(ov.startTime);
         const end = toMinutes(ov.endTime);
         const buf = settings.buffers[ov.bufferLevel || 'small'] || settings.buffers.small;
-        fixedCore.push({ type: 'event', title: e.title, start, end });
+        fixedCore.push({ type: 'event', eventId: e.id, title: e.title, start, end, movable: false });
         busyForWork.push({ start: start - buf.before, end: end + buf.after });
       }
       continue;
     }
     const start = eventMinute(e.start, day);
     const end = eventMinute(e.end, day);
-    const buf = inferBuffer(e, settings);
-    fixedCore.push({ type: 'event', title: e.title, start, end });
+    const buf = resolveTimedEventBuffer(e, overrides || {}, settings);
+    fixedCore.push({ type: 'event', eventId: e.id, title: e.title, start, end, movable: false });
     busyForWork.push({ start: start - buf.before, end: end + buf.after });
+    eventBufferInfo.push({ id: e.id, title: e.title, start, end, ...buf });
   }
 
-  // 夜の生活基盤
+  const fixedTasks = fixedTaskItems(tasks || [], day);
+  fixedCore.push(...fixedTasks);
+  fixedTasks.forEach((x) => busyForWork.push({ start: x.start, end: x.end }));
+
   const bathEnd = bed - Number(settings.bathBeforeBedMinutes || 90);
   const bathStart = bathEnd - Number(settings.bathMinutes || 30);
   const skincareEnd = bathEnd + Number(settings.skincareMinutes || 10);
-  fixedCore.push({ type: 'life', title: 'お風呂＋肌ケア', start: bathStart, end: skincareEnd });
+  fixedCore.push({ type: 'life', title: 'お風呂＋肌ケア', start: bathStart, end: skincareEnd, movable: false });
   busyForWork.push({ start: bathStart, end: skincareEnd });
 
   let free = freeIntervals(wake, bed, mergeIntervals(busyForWork));
   const rawFree = free.reduce((s, b) => s + b.end - b.start, 0);
-  const relaxedTarget = Math.max(Number(settings.relaxedMinMinutes || 90), rawFree * Number(settings.relaxedRatio || 0.2));
-  let budget = Math.max(0, rawFree - relaxedTarget);
+  const relaxedTarget = Math.max(0, Math.max(Number(settings.relaxedMinMinutes || 90), rawFree * Number(settings.relaxedRatio || 0.2)) + Number(energy.relaxedExtra || 0));
+  let budget = Math.max(0, (rawFree - relaxedTarget) * Number(energy.budgetMultiplier || 1));
 
-  // 授業日は夜の重作業を抑える
   if (classDay) {
     const lastEventEnd = Math.max(wake, ...fixedCore.filter((x) => x.type === 'event').map((x) => x.end));
     let eveningAllowance = Number(settings.classDayEveningCapMinutes || 60);
@@ -217,57 +312,110 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
       if (b.start >= lastEventEnd) {
         const allow = Math.min(eveningAllowance, b.end - b.start);
         eveningAllowance -= allow;
-        return allow >= 15 ? [{ start: b.start, end: b.start + allow }] : [];
+        return allow >= 10 ? [{ start: b.start, end: b.start + allow }] : [];
       }
       const before = { start: b.start, end: lastEventEnd };
       const allow = Math.min(eveningAllowance, b.end - lastEventEnd);
       eveningAllowance -= allow;
-      return allow >= 15 ? [before, { start: lastEventEnd, end: lastEventEnd + allow }] : [before];
+      return allow >= 10 ? [before, { start: lastEventEnd, end: lastEventEnd + allow }] : [before];
     });
     budget = Math.min(budget, free.reduce((s, b) => s + b.end - b.start, 0));
   }
 
   const workBlocks = free.map((b) => ({ ...b }));
-  const active = tasks
-    .filter((t) => t.status !== 'paused' && t.remainingMinutes > 0 && t.deadline >= day)
+  const fixedTaskIds = new Set(fixedTasks.map((x) => x.taskId));
+  const active = (tasks || [])
+    .filter((t) => t.status !== 'paused' && !fixedTaskIds.has(t.id) && placementAllowsDay(t, day) && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0) )
     .sort((a, b) => urgency(b, day) - urgency(a, day));
 
   const planned = [];
   let remainingBudget = budget;
   for (const task of active) {
-    if (remainingBudget < 15) break;
-    const wanted = desiredToday(task, day, remainingBudget);
-    const items = placeTask(task, wanted, workBlocks);
+    if (remainingBudget < 5) break;
+    let items = [];
+    if (isPageTask(task)) {
+      const wantedPages = desiredTodayPages(task, day, remainingBudget, Number(energy.budgetMultiplier || 1));
+      items = placePageTask(task, wantedPages, workBlocks, Number(energy.blockCap || 120));
+    } else {
+      const wantedMinutes = desiredTodayMinutes(task, day, remainingBudget, Number(energy.budgetMultiplier || 1));
+      items = placeMinuteTask(task, wantedMinutes, workBlocks, Number(energy.blockCap || 120));
+    }
     const used = items.reduce((s, x) => s + x.end - x.start, 0);
     planned.push(...items);
     remainingBudget -= used;
   }
 
-  const scheduledTaskMinutes = planned.reduce((s, x) => s + x.end - x.start, 0);
-  const relaxedMinutes = Math.max(relaxedTarget, rawFree - scheduledTaskMinutes);
-  const timeline = [...fixedCore, ...planned].sort((a, b) => a.start - b.start);
+  const allTaskItems = [...fixedTasks, ...planned];
+  const scheduledTaskMinutes = allTaskItems.reduce((s, x) => s + x.end - x.start, 0);
+  const scheduledTaskPages = allTaskItems.reduce((s, x) => s + Number(x.pages || 0), 0);
+  const relaxedMinutes = Math.max(relaxedTarget, rawFree - planned.reduce((s, x) => s + x.end - x.start, 0));
+  const timeline = [...fixedCore.filter((x) => x.type !== 'task'), ...allTaskItems].sort((a, b) => a.start - b.start);
 
-  return {
-    classDay,
-    allDayPending,
-    timeline,
-    rawFreeMinutes: rawFree,
-    scheduledTaskMinutes,
-    relaxedMinutes,
-    warnings: deadlineWarnings(tasks, day),
-  };
+  return { classDay, energyState, allDayPending, eventBufferInfo, timeline, rawFreeMinutes: rawFree, scheduledTaskMinutes, scheduledTaskPages, relaxedMinutes };
 }
 
-function deadlineWarnings(tasks, day) {
-  return tasks
-    .filter((t) => t.status !== 'paused' && t.remainingMinutes > 0 && t.deadline >= day)
-    .map((t) => {
-      const d = daysUntil(t.deadline, day);
-      const perDay = t.remainingMinutes / d;
-      if (perDay >= 180) return { level: 'red', text: `${t.title}: 1日平均 ${minutesLabel(perDay)} 必要。期限設定の見直し候補です。` };
-      if (perDay >= 120) return { level: 'orange', text: `${t.title}: 1日平均 ${minutesLabel(perDay)} 必要。前倒し推奨です。` };
-      if (perDay >= 75) return { level: 'yellow', text: `${t.title}: 1日平均 ${minutesLabel(perDay)} が必要です。` };
-      return null;
-    })
-    .filter(Boolean);
+export function forecastDeadlineRisks({ fromDay, tasks, events, overrides, settings, dayModes = {}, dayStates = {}, dailySleepPlans = {}, wakeRecords = {}, maxDays }) {
+  settings = deepDefaults(settings);
+  const active = (tasks || []).filter((t) => t.status !== 'paused' && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0));
+  if (!active.length) return [];
+  const horizon = Math.min(Number(maxDays || settings.forecastDays || 90), 180);
+  const sim = active.map((t) => ({ ...t }));
+  const finish = {};
+  const remainingAtDeadline = {};
+  const plannedThroughDeadline = {};
+
+  for (let i = 0; i <= horizon; i++) {
+    const day = addDays(fromDay, i);
+    const sleepOwn = dailySleepPlans[day] || {}, sleepPrev = dailySleepPlans[addDays(day, -1)] || {};
+    const daySettings = { ...settings, wakeTime: wakeRecords[day]?.wakeTime || sleepPrev.nextWakeTime || settings.wakeTime, bedTime: sleepOwn.bedTime || settings.bedTime };
+    const plan = generateDayPlan({ day, tasks: sim, events, overrides, settings: daySettings, classDayOverride: dayModes[day] || 'auto', energyState: dayStates[day] || 'normal' });
+    for (const item of plan.timeline.filter((x) => x.type === 'task' && x.taskId)) {
+      const t = sim.find((x) => x.id === item.taskId);
+      if (!t) continue;
+      if (isPageTask(t)) {
+        const amount = Number(item.pages || 0);
+        t.remainingPages = Math.max(0, Number(t.remainingPages || 0) - amount);
+        if (day <= t.deadline) plannedThroughDeadline[t.id] = (plannedThroughDeadline[t.id] || 0) + amount;
+        if (t.remainingPages <= 0 && !finish[t.id]) finish[t.id] = day;
+      } else {
+        const amount = Number(item.end - item.start || item.minutes || 0);
+        t.remainingMinutes = Math.max(0, Number(t.remainingMinutes || 0) - amount);
+        if (day <= t.deadline) plannedThroughDeadline[t.id] = (plannedThroughDeadline[t.id] || 0) + amount;
+        if (t.remainingMinutes <= 0 && !finish[t.id]) finish[t.id] = day;
+      }
+    }
+    for (const t of sim) {
+      if (day === t.deadline) remainingAtDeadline[t.id] = isPageTask(t) ? Math.max(0, Number(t.remainingPages || 0)) : Math.max(0, Number(t.remainingMinutes || 0));
+    }
+    if (sim.every((t) => isPageTask(t) ? Number(t.remainingPages || 0) <= 0 : Number(t.remainingMinutes || 0) <= 0)) break;
+  }
+
+  return active.map((original) => {
+    const finishDay = finish[original.id] || null;
+    const isPages = isPageTask(original);
+    const currentRemaining = isPages ? Number(original.remainingPages || 0) : Number(original.remainingMinutes || 0);
+    const shortage = Number(remainingAtDeadline[original.id] ?? currentRemaining);
+    const days = daysUntil(original.deadline, fromDay);
+    const unit = isPages ? 'ページ' : '分';
+    let level = 'green';
+    let text = '期限内に完了見込み';
+    let action = '現在の配分で継続';
+    if (original.deadline < fromDay && currentRemaining > 0) {
+      level = 'red';
+      text = `期限超過・残り${Math.ceil(currentRemaining)}${unit}`;
+      action = '最優先で再配置または期限を見直す';
+    } else if (!finishDay || finishDay > original.deadline) {
+      const late = finishDay ? Math.max(1, daysUntil(finishDay, original.deadline)) : 99;
+      level = late <= 2 ? 'orange' : 'red';
+      const catchup = Math.max(1, Math.ceil(shortage * Math.min(7, days) / days));
+      text = finishDay ? `${finishDay}ごろ完了見込み（期限超過）` : `期限までに${Math.ceil(shortage)}${unit}残る見込み`;
+      action = `今後7日で追加 ${Math.min(Math.ceil(shortage), catchup)}${unit}程度を前倒し候補`;
+    } else {
+      const slack = Math.round((new Date(`${original.deadline}T12:00:00`) - new Date(`${finishDay}T12:00:00`)) / 86_400_000);
+      if (slack <= 1) { level = 'yellow'; text = '期限ぎりぎりで完了見込み'; action = '少し前倒しすると安全'; }
+      else { level = 'green'; text = `${Math.max(0, slack)}日程度の余裕`; }
+    }
+    return { taskId: original.id, title: original.title, level, text, action, finishDay, shortage, plannedAmount: plannedThroughDeadline[original.id] || 0, unit: isPages ? 'pages' : 'minutes' };
+  });
 }
+
