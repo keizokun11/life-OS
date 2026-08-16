@@ -1,9 +1,9 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.5';
 
-const APP_VERSION = '1.4.0';
-const DATA_SCHEMA_VERSION = 6;
-const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions'];
-const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions'];
+const APP_VERSION = '1.5';
+const DATA_SCHEMA_VERSION = 7;
+const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation'];
+const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation'];
 const K = (name) => `lifeos:${name}`;
 const load = (name, fallback) => { try { return JSON.parse(localStorage.getItem(K(name))) ?? fallback; } catch { return fallback; } };
 const save = (name, value) => localStorage.setItem(K(name), JSON.stringify(value));
@@ -73,6 +73,7 @@ function initializeStorage() {
     if (Number(meta.schemaVersion||0) < 4 && !localStorage.getItem(K('dailySleepPlans'))) save('dailySleepPlans', {});
     if (Number(meta.schemaVersion||0) < 5 && !localStorage.getItem(K('wakeRecords'))) save('wakeRecords', {});
     if (Number(meta.schemaVersion||0) < 6 && !localStorage.getItem(K('operationLog'))) save('operationLog', []);
+    if (Number(meta.schemaVersion||0) < 7 && !localStorage.getItem(K('motivation'))) save('motivation', normalizeMotivation());
     save('meta', { ...meta, appVersion:APP_VERSION, schemaVersion:DATA_SCHEMA_VERSION, upgradedAt:new Date().toISOString() });
   }
 }
@@ -94,6 +95,7 @@ let closeouts = load('closeouts', {});
 let activeSession = load('activeSession', null);
 let semesters = load('semesters', []).map(normalizeSemester);
 let classExceptions = load('classExceptions', {});
+let motivation = normalizeMotivation(load('motivation', null));
 let selectedSemesterId = semesters[0]?.id || '';
 let editingCourseId = null;
 let taskDraft = null;
@@ -107,7 +109,7 @@ let cloudTimer = null;
 let sessionTimer = null;
 
 function persist({touch=true, cloud=true}={}) {
-  save('tasks',tasks); save('events',events); save('overrides',overrides); save('settings',settings); save('dayModes',dayModes); save('dayStates',dayStates); save('dailySleepPlans',dailySleepPlans); save('wakeRecords',wakeRecords); save('activityLog',activityLog); save('operationLog',operationLog); save('planSnapshots',planSnapshots); save('ideas',ideas); save('closeouts',closeouts); save('activeSession',activeSession); save('semesters',semesters); save('classExceptions',classExceptions);
+  save('tasks',tasks); save('events',events); save('overrides',overrides); save('settings',settings); save('dayModes',dayModes); save('dayStates',dayStates); save('dailySleepPlans',dailySleepPlans); save('wakeRecords',wakeRecords); save('activityLog',activityLog); save('operationLog',operationLog); save('planSnapshots',planSnapshots); save('ideas',ideas); save('closeouts',closeouts); save('activeSession',activeSession); save('semesters',semesters); save('classExceptions',classExceptions); save('motivation',motivation);
   const meta = load('meta',{});
   const now = new Date().toISOString();
   save('meta', { ...meta, appVersion:APP_VERSION, schemaVersion:DATA_SCHEMA_VERSION, ...(touch ? {userDataUpdatedAt:now} : {}), lastSavedAt:now });
@@ -169,6 +171,8 @@ function hhmm(d=new Date()){ return `${String(d.getHours()).padStart(2,'0')}:${S
 function markAwakeNow(){
   const now=new Date(), day=dateKey(now), sleep=sleepPlanForDay(day), wakeTime=hhmm(now);
   wakeRecords[day]={wakeTime,wokeAt:now.toISOString(),plannedWakeTime:sleep.plannedWakeTime,source:'button'};
+  if(!motivation.wakeBonusDays.includes(day)){motivation.wakeBonusDays.push(day);awardExp(10,'起床記録',{wakeTime,plannedWakeTime:sleep.plannedWakeTime},day);}
+  evaluateTitles(day);
   selectedDay=day;
   recordOperation('wake_confirmed','起床を記録',{wakeTime,plannedWakeTime:sleep.plannedWakeTime,source:'button'},day);
   persist(); renderAll(); notice(`起床 ${wakeTime}。この時刻から今日の予定を作成しました。`);
@@ -189,10 +193,156 @@ function plannedSleepMinutes(day){
   const s=sleepPlanForDay(day); let bed=toMinutes(s.bedTime), todayWake=toMinutes(s.wakeTime); if(bed<=todayWake)bed+=1440; let nextWake=1440+toMinutes(s.nextWakeTime); if(nextWake<=bed)nextWake+=1440; return Math.max(0,nextWake-bed);
 }
 function currentPlan(day=selectedDay){ return generateDayPlan({day,tasks,events:planningEventsForDay(day),overrides,settings:effectiveSettingsForDay(day),classDayOverride:dayModes[day]||'auto',energyState:dayStates[day]||'normal'}); }
+function completionKeyForItem(item){ return `${item.type}:${item.taskId||item.title}:${Math.round(item.start)}:${Math.round(item.end)}`; }
+function isItemCompleted(item, day=selectedDay){
+  if(!item || (item.type!=='task' && item.type!=='life')) return false;
+  const key=completionKeyForItem(item);
+  return activityLog.some(a=>a.date===day && (a.key===key || (item.type==='life' && a.kind==='life' && a.title===item.title)));
+}
+function nextPendingWorkItem(plan, day=selectedDay, afterMinute=null){
+  const items=(plan.timeline||[]).filter(x=>(x.type==='task'||x.type==='life')&&!isItemCompleted(x,day));
+  if(afterMinute!==null){ const future=items.find(x=>x.end>afterMinute); if(future)return future; }
+  return items[0]||null;
+}
+function nextVisibleTimelineItem(plan, day=selectedDay, afterMinute=null){
+  const items=(plan.timeline||[]).filter(x=>!(x.type==='task'||x.type==='life')||!isItemCompleted(x,day));
+  if(afterMinute!==null){ const future=items.find(x=>x.end>afterMinute); if(future)return future; }
+  return items[0]||null;
+}
 function currentRisks(){ return forecastDeadlineRisks({fromDay:dateKey(),tasks,events:planningEventsForForecast(dateKey(),settings.forecastDays),overrides,settings,dayModes,dayStates,dailySleepPlans,wakeRecords,maxDays:settings.forecastDays}); }
 
 function riskBadge(r){ if(!r) return ''; const label={green:'順調',yellow:'注意',orange:'厳しい',red:'要調整'}[r.level]; return `<span class="risk-badge ${r.level}">${label}</span>`; }
 
+
+const TITLE_DEFS = [
+  { id:'wake_first', name:'朝を制御し始めた者', desc:'起床をLife OSに記録した' },
+  { id:'first_action', name:'最初の一手を打った者', desc:'作業か生活タスクを初めて完了した' },
+  { id:'page_100', name:'知識の開拓者', desc:'累計100ページを突破' },
+  { id:'page_500', name:'積み上げの証明者', desc:'累計500ページを突破' },
+  { id:'life_7', name:'生活基盤の守護者', desc:'生活タスクを7回完了' },
+  { id:'mission_clear', name:'今日を回収した者', desc:'今日の3ミッションを達成' },
+  { id:'recovery', name:'復帰できる人間', desc:'崩れた翌日に戻ってきた' },
+  { id:'boss_finisher', name:'締切を倒す者', desc:'課題・タスクを完了状態まで持っていった' },
+  { id:'challenge_clear', name:'小さな挑戦を拾う者', desc:'挑戦カードを達成した' },
+  { id:'closeout_first', name:'一日を閉じられる者', desc:'夜の終了処理を完了' },
+];
+function normalizeMotivation(m=null){
+  const x=m||{};
+  return {
+    exp:Math.max(0,Number(x.exp||0)),
+    titleIds:Array.isArray(x.titleIds)?x.titleIds:[],
+    titleEvents:Array.isArray(x.titleEvents)?x.titleEvents:[],
+    missionBonusDays:Array.isArray(x.missionBonusDays)?x.missionBonusDays:[],
+    challengeBonusDays:Array.isArray(x.challengeBonusDays)?x.challengeBonusDays:[],
+    wakeBonusDays:Array.isArray(x.wakeBonusDays)?x.wakeBonusDays:[],
+    closeoutBonusDays:Array.isArray(x.closeoutBonusDays)?x.closeoutBonusDays:[],
+    victories:Array.isArray(x.victories)?x.victories.slice(0,80):[],
+  };
+}
+function levelForExp(exp=motivation.exp){return Math.max(1,Math.floor(Math.sqrt(Math.max(0,Number(exp||0))/120))+1);}
+function expForLevel(level){return Math.round(120*Math.pow(Math.max(0,level-1),2));}
+function motivationStats(){
+  const level=levelForExp(); const current=expForLevel(level), next=expForLevel(level+1), inLevel=Math.max(0,motivation.exp-current), need=Math.max(1,next-current);
+  const currentTitle=[...TITLE_DEFS].reverse().find(t=>motivation.titleIds.includes(t.id)) || {name:'挑戦者',desc:'これから積み上げる'};
+  return {level,exp:Math.round(motivation.exp),current,next,progress:Math.min(100,Math.round(inLevel/need*100)),nextNeed:Math.max(0,next-motivation.exp),currentTitle};
+}
+function totalDonePages(){return activityLog.filter(a=>a.kind==='task').reduce((s,a)=>s+Number(a.pages||0),0);}
+function totalDoneTaskMinutes(){return activityLog.filter(a=>a.kind==='task').reduce((s,a)=>s+Number(a.minutes||0),0);}
+function lifeDoneCount(){return activityLog.filter(a=>a.kind==='life').length;}
+function addVictory(title,details={},day=dateKey()){
+  motivation.victories.unshift({id:uid(),day,createdAt:new Date().toISOString(),title:String(title||'勝利'),details});
+  motivation.victories=motivation.victories.slice(0,80);
+}
+function unlockTitle(id,day=dateKey()){
+  if(motivation.titleIds.includes(id)) return false;
+  const def=TITLE_DEFS.find(t=>t.id===id); if(!def) return false;
+  motivation.titleIds.push(id); motivation.titleEvents.unshift({id:uid(),titleId:id,title:def.name,day,createdAt:new Date().toISOString()});
+  recordOperation('title_unlocked',`称号獲得｜${def.name}`,{titleId:id,title:def.name},day);
+  addVictory(`称号「${def.name}」を獲得`,{titleId:id},day);
+  notice(`称号獲得：${def.name}`);
+  return true;
+}
+function awardExp(points,reason,details={},day=dateKey()){
+  const add=Math.max(0,Math.round(Number(points||0))); if(!add) return;
+  const before=levelForExp(); motivation.exp=Math.max(0,Math.round(motivation.exp+add)); const after=levelForExp();
+  recordOperation('exp_awarded',`EXP +${add}｜${reason}`,{beforeLevel:before,afterLevel:after,totalExp:motivation.exp,...details},day);
+  if(after>before){addVictory(`Level ${after} に到達`,{beforeLevel:before,afterLevel:after},day); notice(`Level ${after} に上がった`);}
+}
+function evaluateTitles(day=dateKey(),extra={}){
+  if(Object.keys(wakeRecords||{}).length>0) unlockTitle('wake_first',day);
+  if(activityLog.some(a=>a.kind==='task'||a.kind==='life')) unlockTitle('first_action',day);
+  if(totalDonePages()>=100) unlockTitle('page_100',day);
+  if(totalDonePages()>=500) unlockTitle('page_500',day);
+  if(lifeDoneCount()>=7) unlockTitle('life_7',day);
+  if(Object.keys(closeouts||{}).length>0) unlockTitle('closeout_first',day);
+  if(extra.taskCompleted) unlockTitle('boss_finisher',day);
+  const yesterday=addDays(day,-1), yesterdayActivity=activityLog.some(a=>a.date===yesterday&&(a.kind==='task'||a.kind==='life')), yesterdayPlanned=Boolean(planSnapshots[yesterday]||wakeRecords[yesterday]);
+  const todayActivity=activityLog.some(a=>a.date===day&&(a.kind==='task'||a.kind==='life'));
+  if(yesterdayPlanned&&!yesterdayActivity&&todayActivity) unlockTitle('recovery',day);
+}
+function dayDoneStats(day,plan){
+  const logs=activityLog.filter(a=>a.date===day);
+  const donePages=logs.filter(a=>a.kind==='task').reduce((s,a)=>s+Number(a.pages||0),0);
+  const doneTaskMinutes=logs.filter(a=>a.kind==='task').reduce((s,a)=>s+Number(a.minutes||0),0);
+  const doneLife=logs.filter(a=>a.kind==='life').length;
+  const plannedPages=Number(plan?.scheduledTaskPages||0);
+  const plannedMinutes=Number(plan?.scheduledTaskMinutes||0);
+  const taskRatio=plannedPages?donePages/plannedPages:(plannedMinutes?doneTaskMinutes/plannedMinutes:0);
+  const lifePlanned=(plan?.timeline||[]).some(x=>x.type==='life');
+  const lifeOK=lifePlanned ? doneLife>0 : true;
+  return {donePages,doneTaskMinutes,doneLife,plannedPages,plannedMinutes,taskRatio,lifeOK};
+}
+function dailyMissions(day,plan){
+  const timeline=plan?.timeline||[];
+  const taskItems=timeline.filter(x=>x.type==='task');
+  const lifeItems=timeline.filter(x=>x.type==='life');
+  const stats=dayDoneStats(day,plan);
+  const main=taskItems[0]; const sub=taskItems[1]; const life=lifeItems[0];
+  const missions=[];
+  if(main) missions.push({kind:'main',label:`MAIN：${main.title}${main.pages?` ${main.pages}ページ`:` ${minutesLabel(main.end-main.start)}`}`,done:isItemCompleted(main,day)});
+  else missions.push({kind:'main',label:'MAIN：今日は課題を増やしすぎない',done:true});
+  if(sub) missions.push({kind:'sub',label:`SUB：${sub.title}${sub.pages?` ${sub.pages}ページ`:` ${minutesLabel(sub.end-sub.start)}`}`,done:isItemCompleted(sub,day)});
+  else missions.push({kind:'sub',label:stats.plannedPages?`SUB：合計${stats.plannedPages}ページを回収`:'SUB：予定を壊さず整える',done:stats.plannedPages?stats.donePages>=stats.plannedPages:true});
+  if(life) missions.push({kind:'life',label:`LIFE：${life.title}`,done:isItemCompleted(life,day)});
+  else missions.push({kind:'life',label:'LIFE：生活の最低ラインを守る',done:true});
+  return missions.slice(0,3);
+}
+function checkMissionBonus(day=dateKey(),plan=planSnapshots[day]||currentPlan(day)){
+  const missions=dailyMissions(day,plan);
+  if(missions.length && missions.every(m=>m.done) && !motivation.missionBonusDays.includes(day)){
+    motivation.missionBonusDays.push(day); awardExp(60,'今日の3ミッション達成',{day},day); unlockTitle('mission_clear',day); addVictory('今日の3ミッションを回収',{missions:missions.map(m=>m.label)},day);
+  }
+}
+function dailyChallenge(day=dateKey()){
+  const list=[
+    {id:'focus25',title:'25分だけ無音で集中',desc:'短くても、開始した事実を作る'},
+    {id:'plus5',title:'予定より5ページだけ前倒し',desc:'余裕がある日だけでOK'},
+    {id:'phoneaway',title:'スマホを遠くに置いて1セッション',desc:'開始の邪魔を減らす'},
+    {id:'lifeearly',title:'生活タスクを先に倒す',desc:'夜の自分を助ける'},
+    {id:'oneblock',title:'1ブロックだけ予定通り開始',desc:'完璧より、始動'},
+  ];
+  const idx=Math.abs([...day].reduce((s,c)=>s+c.charCodeAt(0),0))%list.length; return list[idx];
+}
+function completeChallenge(day=dateKey()){
+  if(motivation.challengeBonusDays.includes(day)) return;
+  const ch=dailyChallenge(day); motivation.challengeBonusDays.push(day); awardExp(35,`挑戦カード達成｜${ch.title}`,{challengeId:ch.id},day); unlockTitle('challenge_clear',day); addVictory(`挑戦カード達成：${ch.title}`,{challengeId:ch.id},day); persist(); renderAll();
+}
+function heatPercent(day,plan){
+  const s=dayDoneStats(day,plan); const wake=Boolean(wakeRecords[day]);
+  const task=Math.min(70,Math.round(Math.max(0,s.taskRatio)*70)); const life=s.lifeOK?20:0; const morning=wake?10:0;
+  return Math.max(0,Math.min(100,task+life+morning));
+}
+function motivationPanel(day=dateKey(),plan=currentPlan(day)){
+  const st=motivationStats(), heat=heatPercent(day,plan), missions=dailyMissions(day,plan), ch=dailyChallenge(day), doneChallenge=motivation.challengeBonusDays.includes(day);
+  const missionHtml=missions.map(m=>`<li class="${m.done?'done':''}"><span>${m.done?'✓':'□'}</span>${esc(m.label)}</li>`).join('');
+  return `<section class="card motivation-card"><div class="row between"><div><p class="eyebrow">MISSION / EXP</p><h2>Level ${st.level}｜${esc(st.currentTitle.name)}</h2></div><strong class="heat-badge">熱量 ${heat}%</strong></div><div class="exp-bar"><span style="width:${st.progress}%"></span></div><p class="muted">${st.exp} EXP ・ 次のLevelまで ${Math.round(st.nextNeed)} EXP</p><ul class="mission-list">${missionHtml}</ul><div class="challenge-card ${doneChallenge?'done':''}"><div><strong>挑戦カード：${esc(ch.title)}</strong><small>${esc(ch.desc)}</small></div>${doneChallenge?'<span class="done-mark">達成済み</span>':day===dateKey()?'<button class="secondary small completeChallenge">達成</button>':''}</div></section>`;
+}
+function bossCardsHtml(){
+  const active=tasks.filter(t=>t.status!=='paused' && (Number(t.remainingPages||0)>0||Number(t.remainingMinutes||0)>0)).sort((a,b)=>String(a.deadline).localeCompare(String(b.deadline))).slice(0,6);
+  if(!active.length) return '';
+  const cards=active.map(t=>{const isPage=Number.isFinite(Number(t.remainingPages)); const initial=Math.max(1,Number(isPage?(t.initialPages||t.remainingPages):(t.initialMinutes||t.remainingMinutes)||1)); const remaining=Math.max(0,Number(isPage?t.remainingPages:t.remainingMinutes||0)); const hp=Math.max(0,Math.min(100,Math.round(remaining/initial*100))); const dealt=100-hp; return `<div class="boss-card"><div class="row between"><div><strong>${esc(t.title)}</strong><small>期限 ${esc(t.deadline)} ・ Boss HP ${hp}%</small></div><span class="risk-badge ${hp<25?'green':hp<55?'yellow':hp<80?'orange':'red'}">${isPage?`${Math.ceil(remaining)}頁`:`${minutesLabel(remaining)}`}</span></div><div class="boss-bar"><span style="width:${dealt}%"></span></div></div>`;}).join('');
+  return `<section class="card"><p class="eyebrow">BOSS MODE</p><h2>締切ボス</h2><p class="muted">進めた分だけHPが減る。大きい課題を“倒す対象”として見える化します。</p><div class="boss-list">${cards}</div></section>`;
+}
 function saveTodaySnapshot(plan, manualMode) {
   if (selectedDay !== dateKey()) return;
   const sleep=sleepPlanForDay(selectedDay);
@@ -208,22 +358,24 @@ function renderNow(){
   if(!dayHasStarted(dateKey())){ $('nowTab').innerHTML=wakeGateMarkup('now'); const b=$('wakeNow-now'); if(b)b.onclick=markAwakeNow; return; }
   const plan = currentPlan(dateKey());
   const now = new Date(); const nowMin=now.getHours()*60+now.getMinutes();
-  const nextTask = plan.timeline.find(x=>x.type==='task' && x.end>nowMin) || plan.timeline.find(x=>x.type==='task') || plan.timeline.find(x=>x.type==='life' && x.end>nowMin);
+  const nextTask = nextPendingWorkItem(plan, dateKey(), nowMin);
+  const motivationHtml = motivationPanel(dateKey(), plan);
   if (activeSession) {
     const elapsed = Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000));
-    $('nowTab').innerHTML = `<div class="focus-screen"><p class="eyebrow">ACTIVE SESSION</p><h2>${esc(activeSession.title)}</h2><div class="focus-big">${activeSession.plannedPages ? `${activeSession.plannedPages}ページ` : activeSession.taskId ? minutesLabel(activeSession.plannedMinutes||0) : '生活タスク'}</div><p class="focus-timer" id="focusTimer">${minutesLabel(elapsed)}</p><div class="focus-actions"><button id="finishSession" class="primary">完了</button><button id="partialSession" class="secondary">途中終了</button><button id="cancelSession" class="ghost">中断（記録しない）</button></div><p class="muted">開始後はここだけ見ればOK。ページ学習なら実績から速度も自動学習します。</p></div>`;
+    $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen"><p class="eyebrow">ACTIVE SESSION</p><h2>${esc(activeSession.title)}</h2><div class="focus-big">${activeSession.plannedPages ? `${activeSession.plannedPages}ページ` : activeSession.taskId ? minutesLabel(activeSession.plannedMinutes||0) : '生活タスク'}</div><p class="focus-timer" id="focusTimer">${minutesLabel(elapsed)}</p><div class="focus-actions"><button id="finishSession" class="primary">完了</button><button id="partialSession" class="secondary">途中終了</button><button id="cancelSession" class="ghost">中断（記録しない）</button></div><p class="muted">開始後はここだけ見ればOK。ページ学習なら実績から速度も自動学習します。</p></div>`;
     $('finishSession').onclick=()=>finishActiveSession(false); $('partialSession').onclick=()=>finishActiveSession(true); $('cancelSession').onclick=()=>{ if(confirm('このセッションを記録せず中断しますか？')){const ended=new Date().toISOString(),session={...activeSession};recordOperation('session_cancelled','セッションを中断',{taskId:session.taskId||null,taskTitle:session.title,startedAt:session.startedAt,endedAt:ended,elapsedMinutes:Math.max(1,Math.round((Date.now()-new Date(session.startedAt))/60000))},session.day);activeSession=null;persist();renderNow();} };
     clearInterval(sessionTimer); sessionTimer=setInterval(()=>{ const el=$('focusTimer'); if(el&&activeSession) el.textContent=minutesLabel(Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000))); },15000);
     return;
   }
   clearInterval(sessionTimer);
-  $('nowTab').innerHTML = `<div class="focus-screen"><p class="eyebrow">NEXT ACTION</p>${nextTask ? `<h2>${esc(nextTask.title)}</h2><div class="focus-big">${nextTask.pages ? `${nextTask.pages}ページ` : minutesLabel(nextTask.end-nextTask.start)}</div><p class="muted">${timeLabel(nextTask.start)}–${timeLabel(nextTask.end)}${nextTask.movable===false?' ・ 固定':''}</p><button id="startNext" class="primary focus-start">START</button>` : '<h2>今やる課題はありません</h2><p class="muted">今日の必要分が終わっているか、課題が未登録です。</p>'}</div>`;
+  $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen"><p class="eyebrow">NEXT ACTION</p>${nextTask ? `<h2>${esc(nextTask.title)}</h2><div class="focus-big">${nextTask.pages ? `${nextTask.pages}ページ` : minutesLabel(nextTask.end-nextTask.start)}</div><p class="muted">${timeLabel(nextTask.start)}–${timeLabel(nextTask.end)}${nextTask.movable===false?' ・ 固定':''}</p><button id="startNext" class="primary focus-start">START</button>` : '<h2>今やる課題はありません</h2><p class="muted">今日の必要分が終わっているか、課題が未登録です。</p>'}</div>`;
   if($('startNext')) $('startNext').onclick=()=>startSession(nextTask);
+  document.querySelectorAll('.completeChallenge').forEach(b=>b.onclick=()=>completeChallenge(dateKey()));
 }
 function startSession(item){
   if(!item) return; if(activeSession && !confirm('現在のセッションを置き換えますか？')) return;
-  activeSession={id:uid(),day:dateKey(),taskId:item.taskId||null,title:item.title,plannedPages:Number(item.pages||0),plannedMinutes:Number(item.end-item.start||0),kind:item.type,startedAt:new Date().toISOString()};
-  recordOperation('session_started','作業を開始',{sessionId:activeSession.id,taskId:activeSession.taskId,taskTitle:activeSession.title,plannedPages:activeSession.plannedPages,plannedMinutes:activeSession.plannedMinutes,startedAt:activeSession.startedAt},activeSession.day);
+  activeSession={id:uid(),day:dateKey(),taskId:item.taskId||null,title:item.title,plannedPages:Number(item.pages||0),plannedMinutes:Number(item.end-item.start||0),plannedStart:Number(item.start||0),plannedEnd:Number(item.end||0),planKey:completionKeyForItem(item),kind:item.type,startedAt:new Date().toISOString()};
+  recordOperation('session_started','作業を開始',{sessionId:activeSession.id,taskId:activeSession.taskId,taskTitle:activeSession.title,plannedPages:activeSession.plannedPages,plannedMinutes:activeSession.plannedMinutes,startedAt:activeSession.startedAt,planKey:activeSession.planKey},activeSession.day);
   persist(); renderNow();
 }
 function finishActiveSession(partial){
@@ -241,7 +393,8 @@ function finishActiveSession(partial){
     }
   }
   const session={...activeSession}, endedAt=new Date().toISOString();
-  recordCompletion({taskId:session.taskId,title:session.title,kind:session.kind,pages,minutes:elapsed,completeTimeTask,key:`session:${session.id}`,source:'session',date:session.day});
+  const completionKey=session.planKey || (session.kind==='life' ? `life:${session.title}:${session.day}` : `session:${session.id}`);
+  recordCompletion({taskId:session.taskId,title:session.title,kind:session.kind,pages,minutes:elapsed,completeTimeTask,key:completionKey,source:'session',date:session.day});
   recordOperation(partial?'session_partial':'session_completed',partial?'作業を途中終了':'作業を完了',{sessionId:session.id,taskId:session.taskId,taskTitle:session.title,startedAt:session.startedAt,endedAt,pages,minutes:elapsed,completeTimeTask},session.day);
   activeSession=null; persist(); renderAll();
 }
@@ -257,6 +410,12 @@ function recordCompletion({taskId,title,kind='task',pages=0,minutes=0,completeTi
   }
   const completedAt=new Date().toISOString();
   activityLog.unshift({id:uid(),date,completedAt,kind,taskId:taskId||null,title,minutes:Number(minutes||0),pages:Number(pages||0),completeTimeTask:Boolean(completeTimeTask),key:key||uid(),source});
+  const expGain = kind==='life' ? Math.max(15,Math.round(Number(minutes||0)*0.8)) : Number(pages||0)>0 ? Math.max(20,Math.round(Number(pages||0)*6 + Number(minutes||0)*0.35)) : Math.max(20,Math.round(Number(minutes||0)*1.1));
+  awardExp(expGain, kind==='life'?'生活タスク完了':'作業完了',{taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0)},date);
+  addVictory(kind==='life'?`${title}を回収`:`${title}を進めた`,{taskId:taskId||null,pages:Number(pages||0),minutes:Number(minutes||0)},date);
+  const completedTask = taskId ? tasks.find(t=>t.id===taskId) : null;
+  evaluateTitles(date,{taskCompleted:Boolean(completedTask && (Number(completedTask.remainingPages||0)<=0 || Number(completedTask.remainingMinutes||0)<=0 || completeTimeTask))});
+  checkMissionBonus(date, planSnapshots[date]||currentPlan(date));
   if(source!=='session') recordOperation(kind==='life'?'life_completed':'task_progress_recorded',kind==='life'?`${title}を完了`:'作業実績を記録',{taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0),completeTimeTask:Boolean(completeTimeTask),source,completedAt},date);
   if(taskId) recomputeTaskSpeed(taskId);
   persist();
@@ -280,20 +439,21 @@ function renderToday(){
   const plan=currentPlan(selectedDay); saveTodaySnapshot(plan,manualMode);
   const sleep=sleepPlanForDay(selectedDay), tomorrow=addDays(selectedDay,1), sleepMinutes=plannedSleepMinutes(selectedDay);
   const risks=currentRisks();
-  const now=new Date(); const nowMin=now.getHours()*60+now.getMinutes(); const next=plan.timeline.find(x=>x.end>nowMin)||plan.timeline[0];
+  const now=new Date(); const nowMin=now.getHours()*60+now.getMinutes(); const next=nextVisibleTimelineItem(plan,selectedDay,nowMin);
+  const motivationToday = motivationPanel(selectedDay, plan);
   const riskHtml=risks.filter(r=>r.level!=='green').map(r=>`<div class="risk-row ${r.level}"><div><strong>${esc(r.title)}</strong><small>${esc(r.text)}</small></div><span>${esc(r.action)}</span></div>`).join('');
   const pending=plan.allDayPending.map(e=>`<div class="resolver" data-event-id="${esc(e.id)}"><strong>${esc(e.title)}</strong><p class="muted">終日予定は自動では一日拘束にしません。</p><div class="segmented"><button class="selected" data-kind="timed">実時間あり</button><button data-kind="memo">予定メモ</button></div><div class="resolver-fields form-grid compact"><label>開始<input type="time" class="all-start" value="13:00"></label><label>終了<input type="time" class="all-end" value="15:00"></label><label>時間考慮<select class="all-buffer"><option value="none">なし</option><option value="small">小</option><option value="medium" selected>中</option><option value="large">大</option></select></label></div><button class="primary small resolve-save">確定</button></div>`).join('');
   const bufferRows=(plan.eventBufferInfo||[]).map(e=>`<div class="event-buffer-row" data-event-id="${esc(e.id)}"><div><strong>${esc(e.title)}</strong><small>${timeLabel(e.start)}–${timeLabel(e.end)} ・ 前${Math.round(e.before)}分 / 後${Math.round(e.after)}分</small></div><label>時間考慮<select class="event-buffer-select"><option value="auto" ${e.selection==='auto'?'selected':''}>自動</option><option value="none" ${e.selection==='none'?'selected':''}>なし</option><option value="small" ${e.selection==='small'?'selected':''}>小</option><option value="medium" ${e.selection==='medium'?'selected':''}>中</option><option value="large" ${e.selection==='large'?'selected':''}>大</option><option value="custom" ${e.selection==='custom'?'selected':''}>カスタム</option></select></label><div class="custom-buffer-fields ${e.selection==='custom'?'':'hidden'}"><label>前（分）<input type="number" min="0" class="custom-before" value="${Math.round(e.before)}"></label><label>後（分）<input type="number" min="0" class="custom-after" value="${Math.round(e.after)}"></label><button class="primary small custom-buffer-save">保存</button></div></div>`).join('');
   const timeline=plan.timeline.map(x=>{
-    const mins=x.end-x.start, completionKey=`${x.type}:${x.taskId||x.title}:${Math.round(x.start)}:${Math.round(x.end)}`;
-    const recorded=activityLog.some(a=>a.date===selectedDay&&a.key===completionKey); let action='';
+    const mins=x.end-x.start, completionKey=completionKeyForItem(x);
+    const recorded=isItemCompleted(x,selectedDay); let action='';
     if(x.type==='task') action=recorded?'<span class="done-mark">記録済み</span>':`<button class="done-btn" data-task-id="${esc(x.taskId||'')}" data-mins="${mins}" data-pages="${Number(x.pages||0)}" data-kind="task" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">実績</button>`;
     if(x.type==='life') action=recorded?'<span class="done-mark">完了済み</span>':`<button class="done-btn" data-mins="${mins}" data-pages="0" data-kind="life" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">完了</button>`;
     const amount=x.type==='task'&&x.pages?`${x.pages}ページ ・ ${minutesLabel(mins)}目安${x.movable===false?' ・ 固定':''}`:minutesLabel(mins);
     return `<div class="timeline-item ${x.type}"><div class="time">${timeLabel(x.start)}<br><span>${timeLabel(x.end)}</span></div><div class="timeline-body"><strong>${esc(x.title)}</strong><small>${amount}</small></div>${action}</div>`;
   }).join('');
   const close=closeouts[selectedDay];
-  $('todayTab').innerHTML=`<div class="stack"><section class="hero-card"><div class="row between"><div><p class="eyebrow">TODAY</p><input id="dayPicker" class="date-input" type="date" value="${selectedDay}"></div><label class="mode-select-wrap">日モード<select id="dayModeSelect" class="mode-select ${plan.classDay?'class':''}"><option value="auto" ${manualMode==='auto'?'selected':''}>自動判定</option><option value="class" ${manualMode==='class'?'selected':''}>授業日</option><option value="noClass" ${manualMode==='noClass'?'selected':''}>授業なし日</option></select></label></div><div class="energy-row"><span>今日の状態</span><div class="segmented energy-select"><button data-energy="high" ${energyState==='high'?'class="selected"':''}>元気</button><button data-energy="normal" ${energyState==='normal'?'class="selected"':''}>普通</button><button data-energy="tired" ${energyState==='tired'?'class="selected"':''}>疲れ</button></div></div><div class="metrics"><div><span>予定した課題量</span><strong>${Number(plan.scheduledTaskPages||0)}頁 / ${minutesLabel(plan.scheduledTaskMinutes||0)}</strong></div><div><span>ゆったり時間</span><strong>${minutesLabel(plan.relaxedMinutes)}</strong></div></div><div class="next-action"><p>NEXT ACTION</p>${close?'<h2>今日は運用終了</h2><strong>残りは自動で明日以降へ再計画されます</strong>':next?`<h2>${esc(next.title)}</h2><strong>${timeLabel(next.start)}–${timeLabel(next.end)}</strong>`:'<h2>今日はもう予定なし</h2>'}</div></section><section class="card sleep-plan-card"><div class="row between"><div><p class="eyebrow">SLEEP PLAN</p><h3>今日の睡眠予定</h3></div><span class="sleep-duration">睡眠 ${minutesLabel(sleepMinutes)}</span></div><form id="dailySleepForm" class="form-grid"><label>今日の起床${sleep.actualWakeTime?'実績':'予定'}<input type="time" value="${sleep.actualWakeTime||sleep.plannedWakeTime}" disabled></label><label>今日の就寝予定<input type="time" name="bedTime" value="${sleep.bedTime}"></label><label>${tomorrow.slice(5).replace('-', '/')} の起床予定<input type="time" name="nextWakeTime" value="${sleep.nextWakeTime}"></label><div class="sleep-plan-note">${sleep.actualWakeTime?`起床予定 ${sleep.plannedWakeTime} ／ 実際 ${sleep.actualWakeTime}。今日の計画は実際の起床時刻から作成しています。`:`未来日の計画は起床予定 ${sleep.plannedWakeTime} から仮計算します。`} 就寝予定から、お風呂・肌ケアと作業可能時間も再計算します。</div><div class="span2 row"><button class="primary small">保存して再計算</button><button type="button" id="resetSleepPlan" class="secondary small">標準時刻に戻す</button>${selectedDay===dateKey()&&sleep.actualWakeTime?'<button type="button" id="editWakeTime" class="ghost small">起床時刻を修正</button>':''}</div></form></section>${riskHtml?`<section class="card"><h3>期限リスク</h3><div class="risk-list">${riskHtml}</div></section>`:''}${pending?`<section class="card"><h3>終日予定を確認</h3>${pending}</section>`:''}${bufferRows?`<section class="card"><h3>既存予定の前後余白</h3><p class="muted">予定本体は変えず、前後だけLife OS内で確保します。</p><div class="event-buffer-list">${bufferRows}</div></section>`:''}<section class="card"><h3>今日の達成予定</h3><div class="timeline">${timeline||'<p class="muted">予定・課題がまだありません。</p>'}</div><div class="relaxed-band">ゆったり時間　${minutesLabel(plan.relaxedMinutes)}</div>${!isNativeIOS()?'<button id="syncPlanCalendar" class="primary">Google Calendarへ同期（通知）</button>':''}</section><section class="card night-card"><h3>今日を終了する</h3>${close?`<p class="success-note">${new Date(close.closedAt).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})} に終了済み。残った課題は自動再計画対象です。</p>`:`<div class="check-list"><label><input id="closeBath" type="checkbox"> お風呂</label><label><input id="closeSkin" type="checkbox"> 肌ケア</label><label><input id="closePrep" type="checkbox"> 明日の準備</label></div><button id="closeDay" class="primary">今日の運用を終了</button><p class="muted">未完了ページは残量として保持され、明日以降の計画に自動で戻ります。</p>`}</section></div>`;
+  $('todayTab').innerHTML=`<div class="stack"><section class="hero-card"><div class="row between"><div><p class="eyebrow">TODAY</p><input id="dayPicker" class="date-input" type="date" value="${selectedDay}"></div><label class="mode-select-wrap">日モード<select id="dayModeSelect" class="mode-select ${plan.classDay?'class':''}"><option value="auto" ${manualMode==='auto'?'selected':''}>自動判定</option><option value="class" ${manualMode==='class'?'selected':''}>授業日</option><option value="noClass" ${manualMode==='noClass'?'selected':''}>授業なし日</option></select></label></div><div class="energy-row"><span>今日の状態</span><div class="segmented energy-select"><button data-energy="high" ${energyState==='high'?'class="selected"':''}>元気</button><button data-energy="normal" ${energyState==='normal'?'class="selected"':''}>普通</button><button data-energy="tired" ${energyState==='tired'?'class="selected"':''}>疲れ</button></div></div><div class="metrics"><div><span>予定した課題量</span><strong>${Number(plan.scheduledTaskPages||0)}頁 / ${minutesLabel(plan.scheduledTaskMinutes||0)}</strong></div><div><span>ゆったり時間</span><strong>${minutesLabel(plan.relaxedMinutes)}</strong></div></div><div class="next-action"><p>NEXT ACTION</p>${close?'<h2>今日は運用終了</h2><strong>残りは自動で明日以降へ再計画されます</strong>':next?`<h2>${esc(next.title)}</h2><strong>${timeLabel(next.start)}–${timeLabel(next.end)}</strong>`:'<h2>今日はもう予定なし</h2>'}</div></section>${motivationToday}<section class="card sleep-plan-card"><div class="row between"><div><p class="eyebrow">SLEEP PLAN</p><h3>今日の睡眠予定</h3></div><span class="sleep-duration">睡眠 ${minutesLabel(sleepMinutes)}</span></div><form id="dailySleepForm" class="form-grid"><label>今日の起床${sleep.actualWakeTime?'実績':'予定'}<input type="time" value="${sleep.actualWakeTime||sleep.plannedWakeTime}" disabled></label><label>今日の就寝予定<input type="time" name="bedTime" value="${sleep.bedTime}"></label><label>${tomorrow.slice(5).replace('-', '/')} の起床予定<input type="time" name="nextWakeTime" value="${sleep.nextWakeTime}"></label><div class="sleep-plan-note">${sleep.actualWakeTime?`起床予定 ${sleep.plannedWakeTime} ／ 実際 ${sleep.actualWakeTime}。今日の計画は実際の起床時刻から作成しています。`:`未来日の計画は起床予定 ${sleep.plannedWakeTime} から仮計算します。`} 就寝予定から、お風呂・肌ケアと作業可能時間も再計算します。</div><div class="span2 row"><button class="primary small">保存して再計算</button><button type="button" id="resetSleepPlan" class="secondary small">標準時刻に戻す</button>${selectedDay===dateKey()&&sleep.actualWakeTime?'<button type="button" id="editWakeTime" class="ghost small">起床時刻を修正</button>':''}</div></form></section>${riskHtml?`<section class="card"><h3>期限リスク</h3><div class="risk-list">${riskHtml}</div></section>`:''}${pending?`<section class="card"><h3>終日予定を確認</h3>${pending}</section>`:''}${bufferRows?`<section class="card"><h3>既存予定の前後余白</h3><p class="muted">予定本体は変えず、前後だけLife OS内で確保します。</p><div class="event-buffer-list">${bufferRows}</div></section>`:''}<section class="card"><h3>今日の達成予定</h3><div class="timeline">${timeline||'<p class="muted">予定・課題がまだありません。</p>'}</div><div class="relaxed-band">ゆったり時間　${minutesLabel(plan.relaxedMinutes)}</div>${!isNativeIOS()?'<button id="syncPlanCalendar" class="primary">Google Calendarへ同期（通知）</button>':''}</section><section class="card night-card"><h3>今日を終了する</h3>${close?`<p class="success-note">${new Date(close.closedAt).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})} に終了済み。残った課題は自動再計画対象です。</p>`:`<div class="check-list"><label><input id="closeBath" type="checkbox"> お風呂</label><label><input id="closeSkin" type="checkbox"> 肌ケア</label><label><input id="closePrep" type="checkbox"> 明日の準備</label></div><button id="closeDay" class="primary">今日の運用を終了</button><p class="muted">未完了ページは残量として保持され、明日以降の計画に自動で戻ります。</p>`}</section></div>`;
   $('dayPicker').onchange=e=>{selectedDay=e.target.value;renderToday();};
   $('dayModeSelect').onchange=e=>{const before=dayModes[selectedDay]||'auto',after=e.target.value;if(after==='auto') delete dayModes[selectedDay]; else dayModes[selectedDay]=after;recordOperation('day_mode_changed','授業日モードを変更',{before,after},selectedDay);persist();renderToday();renderHistory();};
   $('dailySleepForm').onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries()),before=dailySleepPlans[selectedDay]||null;dailySleepPlans[selectedDay]={bedTime:d.bedTime||settings.bedTime,nextWakeTime:d.nextWakeTime||settings.wakeTime,updatedAt:new Date().toISOString()};recordOperation('sleep_plan_saved','睡眠予定を変更',{before,after:{bedTime:dailySleepPlans[selectedDay].bedTime,nextWakeTime:dailySleepPlans[selectedDay].nextWakeTime}},selectedDay);persist();renderAll();notice('睡眠予定を保存して、今日と明日の計画を再計算しました。');};
@@ -310,8 +470,9 @@ function renderToday(){
   });
   document.querySelectorAll('.resolver').forEach(r=>{let kind='timed';r.querySelectorAll('[data-kind]').forEach(b=>b.onclick=()=>{kind=b.dataset.kind;r.querySelectorAll('[data-kind]').forEach(x=>x.classList.toggle('selected',x===b));r.querySelector('.resolver-fields').classList.toggle('hidden',kind==='memo');});r.querySelector('.resolve-save').onclick=()=>{const eventId=r.dataset.eventId,before=overrides[eventId]||null;overrides[eventId]=kind==='memo'?{kind:'memo'}:{kind:'timed',startTime:r.querySelector('.all-start').value,endTime:r.querySelector('.all-end').value,bufferLevel:r.querySelector('.all-buffer').value};recordOperation('all_day_event_resolved','終日予定の扱いを確定',{eventId,before,after:overrides[eventId]},selectedDay);persist();renderToday();};});
   document.querySelectorAll('.event-buffer-row').forEach(row=>{const sel=row.querySelector('.event-buffer-select'),custom=row.querySelector('.custom-buffer-fields');sel.onchange=()=>{if(sel.value==='custom'){custom.classList.remove('hidden');return;}const eventId=row.dataset.eventId,before=overrides[eventId]||null;if(sel.value==='auto')delete overrides[eventId];else overrides[eventId]={kind:'buffer',bufferLevel:sel.value};recordOperation('event_buffer_changed','予定の前後余白を変更',{eventId,before,after:overrides[eventId]||{kind:'auto'}},selectedDay);persist();renderToday();};row.querySelector('.custom-buffer-save').onclick=()=>{const eventId=row.dataset.eventId,before=overrides[eventId]||null;overrides[eventId]={kind:'bufferCustom',before:Math.max(0,Number(row.querySelector('.custom-before').value||0)),after:Math.max(0,Number(row.querySelector('.custom-after').value||0))};recordOperation('event_buffer_changed','予定の前後余白を変更',{eventId,before,after:overrides[eventId]},selectedDay);persist();renderToday();};});
+  document.querySelectorAll('.completeChallenge').forEach(b=>b.onclick=()=>completeChallenge(selectedDay));
   if($('syncPlanCalendar')) $('syncPlanCalendar').onclick=()=>syncPlanToGoogleCalendar(plan);
-  if($('closeDay')) $('closeDay').onclick=()=>{const closedAt=new Date().toISOString();closeouts[selectedDay]={bath:$('closeBath').checked,skincare:$('closeSkin').checked,prep:$('closePrep').checked,closedAt};activityLog.unshift({id:uid(),date:selectedDay,completedAt:closedAt,kind:'closeout',title:'一日終了',minutes:0,pages:0,key:`closeout:${selectedDay}`});recordOperation('day_closed','今日の運用を終了',{...closeouts[selectedDay]},selectedDay);persist();renderAll();};
+  if($('closeDay')) $('closeDay').onclick=()=>{const closedAt=new Date().toISOString();closeouts[selectedDay]={bath:$('closeBath').checked,skincare:$('closeSkin').checked,prep:$('closePrep').checked,closedAt};activityLog.unshift({id:uid(),date:selectedDay,completedAt:closedAt,kind:'closeout',title:'一日終了',minutes:0,pages:0,key:`closeout:${selectedDay}`});recordOperation('day_closed','今日の運用を終了',{...closeouts[selectedDay]},selectedDay);if(!motivation.closeoutBonusDays.includes(selectedDay)){motivation.closeoutBonusDays.push(selectedDay);awardExp(30,'今日の運用終了',{...closeouts[selectedDay]},selectedDay);addVictory('今日の運用を終了できた',{...closeouts[selectedDay]},selectedDay);}evaluateTitles(selectedDay);checkMissionBonus(selectedDay,planSnapshots[selectedDay]||plan);persist();renderAll();};
   syncNativePlan(plan);
 }
 
@@ -364,8 +525,9 @@ function taskFormValues(t){return t||taskDraft||{taskType:'study',title:'',deadl
 function renderTasks(){
   const risks=Object.fromEntries(currentRisks().map(r=>[r.taskId,r])); const edit=tasks.find(t=>t.id===editingTaskId); const f=taskFormValues(edit); const isStudy=f.taskType==='study';
   const assignmentLabels={weekly:'週課題',midterm:'中間課題',final:'期末課題',ondemand:'オンデマンド',other:'その他'};
+  const bosses=bossCardsHtml();
   const rows=tasks.map(t=>{const found=courseForId(t.courseId);const amount=Number.isFinite(Number(t.remainingPages))?`残り ${Number(t.remainingPages||0)}ページ ・ ${t.learnedMinutesPerPage?`学習値 ${t.learnedMinutesPerPage}分/頁`:`初期 ${t.baseMinutesPerPage||t.minutesPerPage}分/頁`}`:`残り目安 ${minutesLabel(t.remainingMinutes||0)}${t.quantityText?` ・ 量 ${esc(t.quantityText)}`:''}`;const source=t.taskType==='classAssignment'?`${found?.course?.name||'授業'}・${assignmentLabels[t.assignmentType]||'課題'}`:t.taskType==='general'?'その他タスク':'学習';return `<div class="task-row"><div><div class="row"><strong>${esc(t.title)}</strong>${riskBadge(risks[t.id])}</div><small>${esc(source)} ・ 期限 ${esc(t.deadline)} ・ ${amount} ・ ${t.placement==='flexible'?'自動配置':t.placement==='date'?`${t.fixedDate}のみ`:`${t.fixedDate} ${t.fixedTime}固定`}</small></div><span class="tag ${t.focus}">${t.focus==='main'?'メイン':t.focus==='sub'?'サブ':'維持'}</span><div class="row"><button class="icon-btn edit-task" data-id="${t.id}">編集</button><button class="icon-btn delete-task" data-id="${t.id}">削除</button></div></div>`;}).join('');
-  $('tasksTab').innerHTML=`<div class="stack"><section class="card"><p class="eyebrow">${edit?'EDIT TASK':'NEW TASK'}</p><h2>${edit?'課題を編集':'課題・タスクを登録'}</h2><form id="taskForm" class="form-grid"><label>種類<select id="taskTypeSelect" name="taskType"><option value="study" ${f.taskType==='study'?'selected':''}>学習（ページ）</option><option value="classAssignment" ${f.taskType==='classAssignment'?'selected':''}>授業課題</option><option value="general" ${f.taskType==='general'?'selected':''}>その他タスク</option></select></label><label>期限<input type="date" name="deadline" required value="${f.deadline}"></label><label class="span2">課題名<input name="title" required value="${esc(f.title)}"></label><div id="courseTaskFields" class="span2 form-grid ${f.taskType==='classAssignment'?'':'hidden'}"><label>授業<select name="courseId"><option value="">選択</option>${courseOptions(f.courseId)}</select></label><label>課題区分<select name="assignmentType"><option value="weekly" ${f.assignmentType==='weekly'?'selected':''}>週課題</option><option value="midterm" ${f.assignmentType==='midterm'?'selected':''}>中間課題</option><option value="final" ${f.assignmentType==='final'?'selected':''}>期末課題</option><option value="ondemand" ${f.assignmentType==='ondemand'?'selected':''}>オンデマンド</option><option value="other" ${f.assignmentType==='other'?'selected':''}>その他</option></select></label></div><div id="studyFields" class="span2 form-grid ${isStudy?'':'hidden'}"><label>残り必要量（ページ）<input type="number" name="remainingPages" min="1" value="${Number(f.remainingPages||30)}"></label><label>1ページ初期目安（分）<input type="number" name="minutesPerPage" min="0.25" step="0.25" value="${Number(f.baseMinutesPerPage||f.minutesPerPage||3)}"></label><label>1回最小（ページ）<input type="number" name="minPages" min="1" value="${Number(f.minPages||5)}"></label><label>1回最大（ページ）<input type="number" name="maxPages" min="1" value="${Number(f.maxPages||30)}"></label></div><div id="timeTaskFields" class="span2 form-grid ${isStudy?'hidden':''}"><label>量（自由入力）<input name="quantityText" value="${esc(f.quantityText||'')}" placeholder="例：2000字 / 問題10問 / 動画2本"></label><label>残り予想時間（分）<input type="number" name="remainingMinutes" min="5" value="${Number(f.remainingMinutes||60)}"></label><label>1回最小（分）<input type="number" name="minBlock" min="5" value="${Number(f.minBlock||20)}"></label><label>1回最大（分）<input type="number" name="maxBlock" min="10" value="${Number(f.maxBlock||120)}"></label></div><label>優先度<select name="priority"><option value="high" ${f.priority==='high'?'selected':''}>高</option><option value="medium" ${f.priority==='medium'?'selected':''}>中</option><option value="low" ${f.priority==='low'?'selected':''}>低</option></select></label><label>重点<select name="focus"><option value="main" ${f.focus==='main'?'selected':''}>メイン</option><option value="sub" ${f.focus==='sub'?'selected':''}>サブ</option><option value="maintain" ${f.focus==='maintain'?'selected':''}>維持</option></select></label><label>領域<select name="mode"><option value="grow" ${f.mode==='grow'?'selected':''}>伸ばす</option><option value="maintain" ${f.mode==='maintain'?'selected':''}>維持</option></select></label><label>時間帯<select name="timePreference"><option value="any" ${f.timePreference==='any'?'selected':''}>いつでも</option><option value="morning" ${f.timePreference==='morning'?'selected':''}>朝優先</option><option value="evening" ${f.timePreference==='evening'?'selected':''}>夜優先</option></select></label><label>配置方法<select id="placementSelect" name="placement"><option value="flexible" ${f.placement==='flexible'?'selected':''}>自動移動OK</option><option value="date" ${f.placement==='date'?'selected':''}>指定日だけ</option><option value="datetime" ${f.placement==='datetime'?'selected':''}>指定日時に固定</option></select></label><div id="fixedFields" class="span2 form-grid ${f.placement==='flexible'?'hidden':''}"><label>固定日<input type="date" name="fixedDate" value="${f.fixedDate||dateKey()}"></label><label class="fixed-time ${f.placement==='datetime'?'':'hidden'}">開始時刻<input type="time" name="fixedTime" value="${f.fixedTime||'09:00'}"></label><label id="fixedPageField" class="fixed-time ${f.placement==='datetime'&&isStudy?'':'hidden'}">その枠で進めるページ<input type="number" name="fixedPages" min="1" value="${Number(f.fixedPages||5)}"></label><label id="fixedMinuteField" class="fixed-time ${f.placement==='datetime'&&!isStudy?'':'hidden'}">その枠の予定時間（分）<input type="number" name="fixedMinutes" min="5" value="${Number(f.fixedMinutes||30)}"></label></div><div class="span2 row"><button class="primary">${edit?'更新':'登録'}</button>${edit||taskDraft?'<button type="button" id="cancelEdit" class="secondary">入力をリセット</button>':''}</div></form><p class="muted">学習はページ数で管理。授業課題・その他タスクは「量のメモ＋予想時間」でLife OSが空き時間へ配分します。</p></section><section class="card"><h3>登録済み</h3><div class="task-list">${rows||'<p class="muted">まだ課題がありません。</p>'}</div></section></div>`;
+  $('tasksTab').innerHTML=`<div class="stack"><section class="card"><p class="eyebrow">${edit?'EDIT TASK':'NEW TASK'}</p><h2>${edit?'課題を編集':'課題・タスクを登録'}</h2><form id="taskForm" class="form-grid"><label>種類<select id="taskTypeSelect" name="taskType"><option value="study" ${f.taskType==='study'?'selected':''}>学習（ページ）</option><option value="classAssignment" ${f.taskType==='classAssignment'?'selected':''}>授業課題</option><option value="general" ${f.taskType==='general'?'selected':''}>その他タスク</option></select></label><label>期限<input type="date" name="deadline" required value="${f.deadline}"></label><label class="span2">課題名<input name="title" required value="${esc(f.title)}"></label><div id="courseTaskFields" class="span2 form-grid ${f.taskType==='classAssignment'?'':'hidden'}"><label>授業<select name="courseId"><option value="">選択</option>${courseOptions(f.courseId)}</select></label><label>課題区分<select name="assignmentType"><option value="weekly" ${f.assignmentType==='weekly'?'selected':''}>週課題</option><option value="midterm" ${f.assignmentType==='midterm'?'selected':''}>中間課題</option><option value="final" ${f.assignmentType==='final'?'selected':''}>期末課題</option><option value="ondemand" ${f.assignmentType==='ondemand'?'selected':''}>オンデマンド</option><option value="other" ${f.assignmentType==='other'?'selected':''}>その他</option></select></label></div><div id="studyFields" class="span2 form-grid ${isStudy?'':'hidden'}"><label>残り必要量（ページ）<input type="number" name="remainingPages" min="1" value="${Number(f.remainingPages||30)}"></label><label>1ページ初期目安（分）<input type="number" name="minutesPerPage" min="0.25" step="0.25" value="${Number(f.baseMinutesPerPage||f.minutesPerPage||3)}"></label><label>1回最小（ページ）<input type="number" name="minPages" min="1" value="${Number(f.minPages||5)}"></label><label>1回最大（ページ）<input type="number" name="maxPages" min="1" value="${Number(f.maxPages||30)}"></label></div><div id="timeTaskFields" class="span2 form-grid ${isStudy?'hidden':''}"><label>量（自由入力）<input name="quantityText" value="${esc(f.quantityText||'')}" placeholder="例：2000字 / 問題10問 / 動画2本"></label><label>残り予想時間（分）<input type="number" name="remainingMinutes" min="5" value="${Number(f.remainingMinutes||60)}"></label><label>1回最小（分）<input type="number" name="minBlock" min="5" value="${Number(f.minBlock||20)}"></label><label>1回最大（分）<input type="number" name="maxBlock" min="10" value="${Number(f.maxBlock||120)}"></label></div><label>優先度<select name="priority"><option value="high" ${f.priority==='high'?'selected':''}>高</option><option value="medium" ${f.priority==='medium'?'selected':''}>中</option><option value="low" ${f.priority==='low'?'selected':''}>低</option></select></label><label>重点<select name="focus"><option value="main" ${f.focus==='main'?'selected':''}>メイン</option><option value="sub" ${f.focus==='sub'?'selected':''}>サブ</option><option value="maintain" ${f.focus==='maintain'?'selected':''}>維持</option></select></label><label>領域<select name="mode"><option value="grow" ${f.mode==='grow'?'selected':''}>伸ばす</option><option value="maintain" ${f.mode==='maintain'?'selected':''}>維持</option></select></label><label>時間帯<select name="timePreference"><option value="any" ${f.timePreference==='any'?'selected':''}>いつでも</option><option value="morning" ${f.timePreference==='morning'?'selected':''}>朝優先</option><option value="evening" ${f.timePreference==='evening'?'selected':''}>夜優先</option></select></label><label>配置方法<select id="placementSelect" name="placement"><option value="flexible" ${f.placement==='flexible'?'selected':''}>自動移動OK</option><option value="date" ${f.placement==='date'?'selected':''}>指定日だけ</option><option value="datetime" ${f.placement==='datetime'?'selected':''}>指定日時に固定</option></select></label><div id="fixedFields" class="span2 form-grid ${f.placement==='flexible'?'hidden':''}"><label>固定日<input type="date" name="fixedDate" value="${f.fixedDate||dateKey()}"></label><label class="fixed-time ${f.placement==='datetime'?'':'hidden'}">開始時刻<input type="time" name="fixedTime" value="${f.fixedTime||'09:00'}"></label><label id="fixedPageField" class="fixed-time ${f.placement==='datetime'&&isStudy?'':'hidden'}">その枠で進めるページ<input type="number" name="fixedPages" min="1" value="${Number(f.fixedPages||5)}"></label><label id="fixedMinuteField" class="fixed-time ${f.placement==='datetime'&&!isStudy?'':'hidden'}">その枠の予定時間（分）<input type="number" name="fixedMinutes" min="5" value="${Number(f.fixedMinutes||30)}"></label></div><div class="span2 row"><button class="primary">${edit?'更新':'登録'}</button>${edit||taskDraft?'<button type="button" id="cancelEdit" class="secondary">入力をリセット</button>':''}</div></form><p class="muted">学習はページ数で管理。授業課題・その他タスクは「量のメモ＋予想時間」でLife OSが空き時間へ配分します。</p></section>${bosses}<section class="card"><h3>登録済み</h3><div class="task-list">${rows||'<p class="muted">まだ課題がありません。</p>'}</div></section></div>`;
   const placement=$('placementSelect'), type=$('taskTypeSelect');
   const updateForm=()=>{const study=type.value==='study',v=placement.value;$('studyFields').classList.toggle('hidden',!study);$('timeTaskFields').classList.toggle('hidden',study);$('courseTaskFields').classList.toggle('hidden',type.value!=='classAssignment');$('fixedFields').classList.toggle('hidden',v==='flexible');document.querySelectorAll('.fixed-time').forEach(x=>x.classList.toggle('hidden',v!=='datetime'));if(v==='datetime'){$('fixedPageField').classList.toggle('hidden',!study);$('fixedMinuteField').classList.toggle('hidden',study);}}; placement.onchange=updateForm; type.onchange=updateForm; updateForm();
   $('taskForm').onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries()),old=tasks.find(t=>t.id===editingTaskId),study=d.taskType==='study';const data={...(old||{}),id:old?.id||uid(),taskType:d.taskType,title:d.title,deadline:d.deadline,priority:d.priority,focus:d.focus,mode:d.mode,timePreference:d.timePreference,placement:d.placement,fixedDate:d.fixedDate||'',fixedTime:d.fixedTime||'09:00',status:'active',courseId:d.taskType==='classAssignment'?(d.courseId||''):'',assignmentType:d.taskType==='classAssignment'?(d.assignmentType||'weekly'):'',quantityText:study?'':d.quantityText||'',minBlock:Number(d.minBlock||20),maxBlock:Number(d.maxBlock||120),fixedMinutes:Number(d.fixedMinutes||30)};if(study){data.remainingPages=Number(d.remainingPages);data.initialPages=old?.taskType==='study'?old.initialPages:Number(d.remainingPages);data.baseMinutesPerPage=Number(d.minutesPerPage);data.minutesPerPage=old?.taskType==='study'&&old?.speedSamples?old.minutesPerPage:Number(d.minutesPerPage);data.minPages=Number(d.minPages||5);data.maxPages=Number(d.maxPages||30);data.fixedPages=Number(d.fixedPages||d.minPages||5);delete data.remainingMinutes;}else{data.remainingMinutes=Number(d.remainingMinutes);data.initialMinutes=old?.taskType===d.taskType?old.initialMinutes:Number(d.remainingMinutes);delete data.remainingPages;delete data.initialPages;delete data.baseMinutesPerPage;delete data.minutesPerPage;delete data.learnedMinutesPerPage;delete data.minPages;delete data.maxPages;}const obj=normalizeTask(data);if(old)tasks=tasks.map(t=>t.id===old.id?obj:t);else tasks.push(obj);recordOperation(old?'task_updated':'task_created',old?'課題・タスクを更新':'課題・タスクを登録',{taskId:obj.id,taskTitle:obj.title,taskType:obj.taskType,deadline:obj.deadline,remainingPages:Number.isFinite(Number(obj.remainingPages))?Number(obj.remainingPages):null,remainingMinutes:Number.isFinite(Number(obj.remainingMinutes))?Number(obj.remainingMinutes):null,courseId:obj.courseId||'',assignmentType:obj.assignmentType||''});editingTaskId=null;taskDraft=null;persist();renderAll();};
@@ -391,7 +553,7 @@ function weeklyReview(){
   return {planned,done,minutes,ratio,top:tasks.find(t=>t.id===topId)?.title||'—',missed:tasks.find(t=>t.id===missId)?.title||'—',advice};
 }
 function renderHistory(){
-  const review=weeklyReview(); const dates=[...new Set([...Object.keys(planSnapshots),...Object.keys(wakeRecords),...activityLog.map(a=>a.date)])].sort().reverse();
+  const review=weeklyReview(); const st=motivationStats(); const titleHtml=TITLE_DEFS.filter(t=>motivation.titleIds.includes(t.id)).map(t=>`<span class="title-chip">${esc(t.name)}</span>`).join(''); const victoryHtml=(motivation.victories||[]).slice(0,30).map(v=>{const t=new Date(v.createdAt);const stamp=Number.isNaN(t.getTime())?v.day:t.toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});return `<div class="victory-entry"><time>${esc(stamp)}</time><strong>${esc(v.title)}</strong></div>`;}).join(''); const dates=[...new Set([...Object.keys(planSnapshots),...Object.keys(wakeRecords),...activityLog.map(a=>a.date)])].sort().reverse();
   const recentOperations=operationLog.slice(0,200).map(op=>{const t=new Date(op.occurredAt);const stamp=Number.isNaN(t.getTime())?'':t.toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});const target=op.targetDate?` ・ 対象 ${esc(op.targetDate)}`:'';return `<div class="operation-entry"><time>${esc(stamp)}</time><div><strong>${esc(op.title)}</strong><small>${esc(op.type)}${target}</small></div></div>`;}).join('');
   const cards=dates.map(day=>{
     const snap=planSnapshots[day], wake=wakeRecords[day], logs=activityLog.filter(a=>a.date===day&&a.kind!=='closeout').sort((a,b)=>String(a.completedAt).localeCompare(String(b.completedAt))), pages=logs.filter(a=>a.kind==='task').reduce((sum,a)=>sum+Number(a.pages||0),0), close=closeouts[day];
@@ -401,7 +563,7 @@ function renderHistory(){
     const sleepText=snap?.bedTime?` ・ 就寝予定 ${snap.bedTime} → 翌朝 ${snap.nextWakeTime||settings.wakeTime}`:'';
     return `<div class="history-day"><div class="row between"><div><strong class="history-date">${day.replaceAll('-','/')}</strong><small class="history-mode">${mode}${wakeText}${sleepText}</small></div><span class="history-life ${close?'done':''}">${close?'一日終了済み':'未終了'}</span></div><div class="history-metrics"><div><span>予定ページ</span><strong>${Number(snap?.scheduledTaskPages||0)}</strong></div><div><span>完了ページ</span><strong>${pages}</strong></div><div><span>ゆったり予定</span><strong>${minutesLabel(snap?.relaxedMinutes||0)}</strong></div></div><div class="history-entries">${entries||'<p class="muted">完了記録なし</p>'}</div></div>`;
   }).join('');
-  $('historyTab').innerHTML=`<div class="stack"><section class="card weekly-card"><p class="eyebrow">WEEKLY REVIEW</p><h2>直近7日</h2><div class="review-metrics"><div><span>予定</span><strong>${review.planned}頁</strong></div><div><span>実績</span><strong>${review.done}頁</strong></div><div><span>達成率</span><strong>${review.ratio}%</strong></div></div><p><strong>最も進んだ（ページ系）：</strong>${esc(review.top)}</p><p><strong>総作業実績：</strong>${minutesLabel(review.minutes)}</p><p><strong>持ち越しが多い：</strong>${esc(review.missed)}</p><p class="review-advice">${esc(review.advice)}</p></section><section class="card"><h2>記録・バックアップ</h2><div class="backup-actions"><button id="exportBackup" class="primary small">JSONを書き出す</button><label class="file-button">JSONを読み込む<input id="importBackup" type="file" accept="application/json,.json"></label><button id="restoreAutoBackup" class="secondary small">更新前バックアップから復元</button></div><p class="muted">起床実績・作業開始/終了・課題変更・授業変更・睡眠予定・設定変更など、Life OSの状態を変える操作は操作履歴にも保存します。画面を開く・スクロールするだけの操作は記録しません。</p></section><section class="card"><div class="row between"><div><p class="eyebrow">ACTION LOG</p><h2>操作履歴</h2></div><span class="muted">全 ${operationLog.length}件</span></div><p class="muted">表示は最新200件。JSONバックアップとGoogle Drive同期には操作履歴全体を含めます。</p><div class="operation-list">${recentOperations||'<p class="muted">まだ操作履歴はありません。</p>'}</div></section><section class="card"><div class="history-list">${cards||'<p class="muted">まだ記録がありません。</p>'}</div></section></div>`;
+  $('historyTab').innerHTML=`<div class="stack"><section class="card motivation-summary"><p class="eyebrow">LIFE LEVEL</p><h2>Level ${st.level}｜${esc(st.currentTitle.name)}</h2><div class="review-metrics"><div><span>EXP</span><strong>${st.exp}</strong></div><div><span>次まで</span><strong>${Math.round(st.nextNeed)}</strong></div><div><span>累計ページ</span><strong>${totalDonePages()}</strong></div></div><div class="exp-bar"><span style="width:${st.progress}%"></span></div><div class="title-list">${titleHtml||'<p class="muted">称号はこれから。</p>'}</div></section><section class="card"><p class="eyebrow">VICTORY LOG</p><h2>勝利ログ</h2><div class="victory-list">${victoryHtml||'<p class="muted">まだ勝利ログはありません。</p>'}</div></section><section class="card weekly-card"><p class="eyebrow">WEEKLY REVIEW</p><h2>直近7日</h2><div class="review-metrics"><div><span>予定</span><strong>${review.planned}頁</strong></div><div><span>実績</span><strong>${review.done}頁</strong></div><div><span>達成率</span><strong>${review.ratio}%</strong></div></div><p><strong>最も進んだ（ページ系）：</strong>${esc(review.top)}</p><p><strong>総作業実績：</strong>${minutesLabel(review.minutes)}</p><p><strong>持ち越しが多い：</strong>${esc(review.missed)}</p><p class="review-advice">${esc(review.advice)}</p></section><section class="card"><h2>記録・バックアップ</h2><div class="backup-actions"><button id="exportBackup" class="primary small">JSONを書き出す</button><label class="file-button">JSONを読み込む<input id="importBackup" type="file" accept="application/json,.json"></label><button id="restoreAutoBackup" class="secondary small">更新前バックアップから復元</button></div><p class="muted">起床実績・作業開始/終了・課題変更・授業変更・睡眠予定・設定変更など、Life OSの状態を変える操作は操作履歴にも保存します。画面を開く・スクロールするだけの操作は記録しません。</p></section><section class="card"><div class="row between"><div><p class="eyebrow">ACTION LOG</p><h2>操作履歴</h2></div><span class="muted">全 ${operationLog.length}件</span></div><p class="muted">表示は最新200件。JSONバックアップとGoogle Drive同期には操作履歴全体を含めます。</p><div class="operation-list">${recentOperations||'<p class="muted">まだ操作履歴はありません。</p>'}</div></section><section class="card"><div class="history-list">${cards||'<p class="muted">まだ記録がありません。</p>'}</div></section></div>`;
   $('exportBackup').onclick=exportBackup; $('importBackup').onchange=importBackup; $('restoreAutoBackup').onclick=restoreLatestAutomaticBackup;
 }
 
@@ -419,9 +581,9 @@ function renderSettings(){
 }
 
 function mergeOperationLogs(a=[],b=[]){const map=new Map();[...(a||[]),...(b||[])].forEach(x=>{if(x?.id&&!map.has(x.id))map.set(x.id,x);});return [...map.values()].sort((x,y)=>String(y.occurredAt||'').localeCompare(String(x.occurredAt||'')));}
-function buildCloudPayload(){ const data={}; CLOUD_KEYS.forEach(k=>data[k]=({tasks,overrides,settings,dayModes,dayStates,dailySleepPlans,wakeRecords,activityLog,operationLog,planSnapshots,ideas,closeouts,activeSession,semesters,classExceptions})[k]); return {version:APP_VERSION,schemaVersion:DATA_SCHEMA_VERSION,exportedAt:new Date().toISOString(),meta:load('meta',{}),data}; }
-function applyPayload(payload){ const d=payload.data||payload; if(d.tasks)tasks=d.tasks.map(normalizeTask); if(d.overrides)overrides=d.overrides; if(d.settings)settings=deepDefaults(d.settings); if(d.dayModes)dayModes=d.dayModes; if(d.dayStates)dayStates=d.dayStates; if(d.dailySleepPlans)dailySleepPlans=d.dailySleepPlans; if('wakeRecords' in d)wakeRecords=d.wakeRecords||{}; if(d.activityLog)activityLog=d.activityLog; if('operationLog' in d)operationLog=d.operationLog||[]; if(d.planSnapshots)planSnapshots=d.planSnapshots; if(d.ideas)ideas=d.ideas; if(d.closeouts)closeouts=d.closeouts; if('activeSession' in d)activeSession=d.activeSession||null; if(d.semesters)semesters=d.semesters.map(normalizeSemester); if(d.classExceptions)classExceptions=d.classExceptions; if(!selectedSemesterId&&semesters.length)selectedSemesterId=semesters[0].id; }
-function hasMeaningfulLocalData(){return tasks.length||activityLog.length||operationLog.length||ideas.length||semesters.length||Object.keys(dayModes).length||Object.keys(dailySleepPlans).length||Object.keys(wakeRecords).length||Object.keys(closeouts).length||Boolean(activeSession);}
+function buildCloudPayload(){ const data={}; CLOUD_KEYS.forEach(k=>data[k]=({tasks,overrides,settings,dayModes,dayStates,dailySleepPlans,wakeRecords,activityLog,operationLog,planSnapshots,ideas,closeouts,activeSession,semesters,classExceptions,motivation})[k]); return {version:APP_VERSION,schemaVersion:DATA_SCHEMA_VERSION,exportedAt:new Date().toISOString(),meta:load('meta',{}),data}; }
+function applyPayload(payload){ const d=payload.data||payload; if(d.tasks)tasks=d.tasks.map(normalizeTask); if(d.overrides)overrides=d.overrides; if(d.settings)settings=deepDefaults(d.settings); if(d.dayModes)dayModes=d.dayModes; if(d.dayStates)dayStates=d.dayStates; if(d.dailySleepPlans)dailySleepPlans=d.dailySleepPlans; if('wakeRecords' in d)wakeRecords=d.wakeRecords||{}; if(d.activityLog)activityLog=d.activityLog; if('operationLog' in d)operationLog=d.operationLog||[]; if(d.planSnapshots)planSnapshots=d.planSnapshots; if(d.ideas)ideas=d.ideas; if(d.closeouts)closeouts=d.closeouts; if('activeSession' in d)activeSession=d.activeSession||null; if(d.semesters)semesters=d.semesters.map(normalizeSemester); if(d.classExceptions)classExceptions=d.classExceptions; if('motivation' in d)motivation=normalizeMotivation(d.motivation); if(!selectedSemesterId&&semesters.length)selectedSemesterId=semesters[0].id; }
+function hasMeaningfulLocalData(){return tasks.length||activityLog.length||operationLog.length||ideas.length||semesters.length||Object.keys(dayModes).length||Object.keys(dailySleepPlans).length||Object.keys(wakeRecords).length||Object.keys(closeouts).length||Boolean(activeSession)||Boolean(motivation.exp||motivation.titleIds.length||motivation.victories.length);}
 function queueCloudSync(){ if(!accessToken||!settings.cloudSyncEnabled)return; clearTimeout(cloudTimer); cloudTimer=setTimeout(()=>syncCloud('auto').catch(()=>{}),2500); }
 async function driveRequest(url,options={}){if(!accessToken)throw new Error('Googleに接続してください。');const headers={Authorization:`Bearer ${accessToken}`,...(options.headers||{})};if(options.body&&!headers['Content-Type'])headers['Content-Type']='application/json';const res=await fetch(url,{...options,headers});if(!res.ok)throw new Error(`Drive API ${res.status}: ${await res.text()}`);if(res.status===204)return null;return res.headers.get('content-type')?.includes('application/json')?res.json():res.text();}
 async function findCloudFile(){const p=new URLSearchParams({spaces:'appDataFolder',q:`name='${settings.cloudFileName||'life-os-data.json'}' and trashed=false`,fields:'files(id,name,modifiedTime)'});const d=await driveRequest(`https://www.googleapis.com/drive/v3/files?${p}`);return d.files?.[0]||null;}
