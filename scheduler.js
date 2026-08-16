@@ -144,12 +144,28 @@ export function daysUntil(deadline, day) {
   return Math.max(1, Math.ceil((b - a) / 86_400_000));
 }
 
+function deadlineDate(task) { return String(task?.deadline || '').slice(0, 10); }
+function deadlineTime(task) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(task?.deadlineTime || '')) ? task.deadlineTime : '23:59'; }
+function deadlineMinuteOnDay(task, day) { return deadlineDate(task) === day ? toMinutes(deadlineTime(task)) : null; }
+function daysUntilTask(task, day) {
+  const a = new Date(`${day}T00:00:00`);
+  const b = new Date(`${deadlineDate(task)}T${deadlineTime(task)}:00`);
+  return Math.max(0.25, Math.ceil((b - a) / 86_400_000));
+}
+function taskExpiredBeforeDay(task, day) { return Boolean(deadlineDate(task)) && deadlineDate(task) < day; }
+function blocksBeforeDeadline(task, day, blocks) {
+  if (taskExpiredBeforeDay(task, day)) return [];
+  const due = deadlineMinuteOnDay(task, day);
+  if (due === null) return blocks;
+  return blocks.map((b) => ({ start: b.start, end: Math.min(b.end, due) })).filter((b) => b.end - b.start >= 5);
+}
+
 export function isPageTask(task) { return Number.isFinite(Number(task?.remainingPages)); }
 export function taskMinutesPerPage(task) { return Math.max(0.25, Number(task?.learnedMinutesPerPage || task?.minutesPerPage || task?.baseMinutesPerPage || 3)); }
 export function estimatedRemainingMinutes(task) { return isPageTask(task) ? Math.max(0, Number(task.remainingPages || 0)) * taskMinutesPerPage(task) : Math.max(0, Number(task.remainingMinutes || 0)); }
 
 function urgency(task, day) {
-  const d = daysUntil(task.deadline, day);
+  const d = daysUntilTask(task, day);
   const priority = { high: 1.40, medium: 1, low: 0.72 }[task.priority] || 1;
   const focus = { main: 1.50, sub: 1.06, maintain: 0.74 }[task.focus] || 1;
   const mode = task.mode === 'grow' ? 1.10 : 1;
@@ -161,7 +177,7 @@ function desiredTodayPages(task, day, budgetMinutes, loadMultiplier = 1) {
   const remainingPages = Math.max(0, Number(task.remainingPages || 0));
   if (remainingPages <= 0 || budgetMinutes <= 0) return 0;
   const minutesPerPage = taskMinutesPerPage(task);
-  const baselinePages = remainingPages / daysUntil(task.deadline, day);
+  const baselinePages = remainingPages / daysUntilTask(task, day);
   const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier;
   const minPages = Math.max(1, Number(task.minPages || 5));
   const maxPages = Math.max(minPages, Number(task.maxPages || 30));
@@ -173,7 +189,7 @@ function desiredTodayPages(task, day, budgetMinutes, loadMultiplier = 1) {
 
 function desiredTodayMinutes(task, day, budget, loadMultiplier = 1) {
   if (Number(task.remainingMinutes || 0) <= 0 || budget <= 0) return 0;
-  const baseline = Number(task.remainingMinutes) / daysUntil(task.deadline, day);
+  const baseline = Number(task.remainingMinutes) / daysUntilTask(task, day);
   const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier;
   const min = Number(task.minBlock || 20);
   const max = Number(task.maxBlock || 120);
@@ -240,17 +256,26 @@ function placementAllowsDay(task, day) {
 
 function fixedTaskItems(tasks, day) {
   return tasks
-    .filter((t) => t.status !== 'paused' && t.placement === 'datetime' && t.fixedDate === day && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0))
+    .filter((t) => t.status !== 'paused' && !taskExpiredBeforeDay(t, day) && t.placement === 'datetime' && t.fixedDate === day && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0))
     .map((t) => {
       const start = toMinutes(t.fixedTime || '09:00');
+      const due = deadlineMinuteOnDay(t, day);
+      const limit = due === null ? Infinity : due;
+      const cap = limit - start;
+      if (cap < 5) return null;
       if (isPageTask(t)) {
-        const pages = Math.max(1, Math.min(Number(t.fixedPages || t.minPages || 5), Number(t.remainingPages || 0)));
-        const minutes = Math.max(1, Math.ceil(pages * taskMinutesPerPage(t)));
-        return { type: 'task', taskId: t.id, title: t.title, start, end: start + minutes, pages, minutesPerPage: taskMinutesPerPage(t), movable: false, fixed: true };
+        const mpp = taskMinutesPerPage(t);
+        const pagesByDeadline = Math.max(0, Math.floor(cap / mpp));
+        const pages = Math.max(0, Math.min(Number(t.fixedPages || t.minPages || 5), Number(t.remainingPages || 0), pagesByDeadline));
+        if (pages <= 0) return null;
+        const minutes = Math.max(1, Math.ceil(pages * mpp));
+        return { type: 'task', taskId: t.id, title: t.title, start, end: start + minutes, pages, minutesPerPage: mpp, movable: false, fixed: true };
       }
-      const minutes = Math.max(5, Math.min(Number(t.fixedMinutes || t.minBlock || 20), Number(t.remainingMinutes || 0)));
+      const minutes = Math.max(0, Math.min(Number(t.fixedMinutes || t.minBlock || 20), Number(t.remainingMinutes || 0), cap));
+      if (minutes < 5) return null;
       return { type: 'task', taskId: t.id, title: t.title, start, end: start + minutes, minutes, movable: false, fixed: true };
-    });
+    })
+    .filter(Boolean);
 }
 
 export function generateDayPlan({ day, tasks, events, overrides, settings, classDayOverride = 'auto', energyState = 'normal' }) {
@@ -325,7 +350,7 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   const workBlocks = free.map((b) => ({ ...b }));
   const fixedTaskIds = new Set(fixedTasks.map((x) => x.taskId));
   const active = (tasks || [])
-    .filter((t) => t.status !== 'paused' && !fixedTaskIds.has(t.id) && placementAllowsDay(t, day) && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0) )
+    .filter((t) => t.status !== 'paused' && !fixedTaskIds.has(t.id) && !taskExpiredBeforeDay(t, day) && placementAllowsDay(t, day) && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0) )
     .sort((a, b) => urgency(b, day) - urgency(a, day));
 
   const planned = [];
@@ -333,12 +358,19 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   for (const task of active) {
     if (remainingBudget < 5) break;
     let items = [];
+    const taskBlocks = blocksBeforeDeadline(task, day, workBlocks);
+    if (!taskBlocks.length) continue;
     if (isPageTask(task)) {
       const wantedPages = desiredTodayPages(task, day, remainingBudget, Number(energy.budgetMultiplier || 1));
-      items = placePageTask(task, wantedPages, workBlocks, Number(energy.blockCap || 120));
+      items = placePageTask(task, wantedPages, taskBlocks, Number(energy.blockCap || 120));
     } else {
       const wantedMinutes = desiredTodayMinutes(task, day, remainingBudget, Number(energy.budgetMultiplier || 1));
-      items = placeMinuteTask(task, wantedMinutes, workBlocks, Number(energy.blockCap || 120));
+      items = placeMinuteTask(task, wantedMinutes, taskBlocks, Number(energy.blockCap || 120));
+    }
+    // taskBlocks is a deadline-clipped copy. Apply the same used intervals back to workBlocks.
+    for (const item of items) {
+      const idx = workBlocks.findIndex((b) => b.start <= item.start && b.end >= item.end);
+      if (idx >= 0) workBlocks[idx] = { start: item.end, end: workBlocks[idx].end };
     }
     const used = items.reduce((s, x) => s + x.end - x.start, 0);
     planned.push(...items);
@@ -375,17 +407,17 @@ export function forecastDeadlineRisks({ fromDay, tasks, events, overrides, setti
       if (isPageTask(t)) {
         const amount = Number(item.pages || 0);
         t.remainingPages = Math.max(0, Number(t.remainingPages || 0) - amount);
-        if (day <= t.deadline) plannedThroughDeadline[t.id] = (plannedThroughDeadline[t.id] || 0) + amount;
+        if (day <= deadlineDate(t)) plannedThroughDeadline[t.id] = (plannedThroughDeadline[t.id] || 0) + amount;
         if (t.remainingPages <= 0 && !finish[t.id]) finish[t.id] = day;
       } else {
         const amount = Number(item.end - item.start || item.minutes || 0);
         t.remainingMinutes = Math.max(0, Number(t.remainingMinutes || 0) - amount);
-        if (day <= t.deadline) plannedThroughDeadline[t.id] = (plannedThroughDeadline[t.id] || 0) + amount;
+        if (day <= deadlineDate(t)) plannedThroughDeadline[t.id] = (plannedThroughDeadline[t.id] || 0) + amount;
         if (t.remainingMinutes <= 0 && !finish[t.id]) finish[t.id] = day;
       }
     }
     for (const t of sim) {
-      if (day === t.deadline) remainingAtDeadline[t.id] = isPageTask(t) ? Math.max(0, Number(t.remainingPages || 0)) : Math.max(0, Number(t.remainingMinutes || 0));
+      if (day === deadlineDate(t)) remainingAtDeadline[t.id] = isPageTask(t) ? Math.max(0, Number(t.remainingPages || 0)) : Math.max(0, Number(t.remainingMinutes || 0));
     }
     if (sim.every((t) => isPageTask(t) ? Number(t.remainingPages || 0) <= 0 : Number(t.remainingMinutes || 0) <= 0)) break;
   }
@@ -395,23 +427,23 @@ export function forecastDeadlineRisks({ fromDay, tasks, events, overrides, setti
     const isPages = isPageTask(original);
     const currentRemaining = isPages ? Number(original.remainingPages || 0) : Number(original.remainingMinutes || 0);
     const shortage = Number(remainingAtDeadline[original.id] ?? currentRemaining);
-    const days = daysUntil(original.deadline, fromDay);
+    const days = daysUntilTask(original, fromDay);
     const unit = isPages ? 'ページ' : '分';
     let level = 'green';
     let text = '期限内に完了見込み';
     let action = '現在の配分で継続';
-    if (original.deadline < fromDay && currentRemaining > 0) {
+    if (deadlineDate(original) < fromDay && currentRemaining > 0) {
       level = 'red';
       text = `期限超過・残り${Math.ceil(currentRemaining)}${unit}`;
       action = '最優先で再配置または期限を見直す';
-    } else if (!finishDay || finishDay > original.deadline) {
+    } else if (!finishDay || finishDay > deadlineDate(original)) {
       const late = finishDay ? Math.max(1, daysUntil(finishDay, original.deadline)) : 99;
       level = late <= 2 ? 'orange' : 'red';
       const catchup = Math.max(1, Math.ceil(shortage * Math.min(7, days) / days));
       text = finishDay ? `${finishDay}ごろ完了見込み（期限超過）` : `期限までに${Math.ceil(shortage)}${unit}残る見込み`;
       action = `今後7日で追加 ${Math.min(Math.ceil(shortage), catchup)}${unit}程度を前倒し候補`;
     } else {
-      const slack = Math.round((new Date(`${original.deadline}T12:00:00`) - new Date(`${finishDay}T12:00:00`)) / 86_400_000);
+      const slack = Math.round((new Date(`${deadlineDate(original)}T${deadlineTime(original)}:00`) - new Date(`${finishDay}T12:00:00`)) / 86_400_000);
       if (slack <= 1) { level = 'yellow'; text = '期限ぎりぎりで完了見込み'; action = '少し前倒しすると安全'; }
       else { level = 'green'; text = `${Math.max(0, slack)}日程度の余裕`; }
     }
