@@ -251,6 +251,14 @@ function placePageTask(task, pages, blocks, blockCap) {
 
 function placementAllowsDay(task, day) {
   if (task.placement === 'date' || task.placement === 'datetime') return task.fixedDate === day;
+  const dow = new Date(`${day}T12:00:00`).getDay();
+  if (Array.isArray(task.learningDays) && task.learningDays.length && !task.learningDays.map(Number).includes(dow)) return false;
+  if (Number.isFinite(Number(task.intervalDays)) && Number(task.intervalDays) > 0 && task.startDate) {
+    const a = new Date(`${String(task.startDate).slice(0,10)}T12:00:00`);
+    const b = new Date(`${day}T12:00:00`);
+    const diff = Math.floor((b - a) / 86_400_000);
+    if (diff >= 0 && diff % Number(task.intervalDays) !== 0) return false;
+  }
   return true;
 }
 
