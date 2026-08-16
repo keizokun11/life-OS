@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS = {
     medium: { before: 30, after: 45 },
     large: { before: 60, after: 90 },
   },
+  subjects: ['英語', 'ドイツ語', '授業', '資格', '生活', 'その他'],
   classKeywords: ['授業', '講義', '演習', 'ゼミ'],
   categoryRules: [
     { keywords: ['授業', '講義', '演習', 'ゼミ'], buffer: 'small' },
