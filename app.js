@@ -1,7 +1,7 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.5.8';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.5.9';
 
-const APP_VERSION = '1.5.8';
-const DATA_SCHEMA_VERSION = 14;
+const APP_VERSION = '1.5.9';
+const DATA_SCHEMA_VERSION = 15;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const K = (name) => `lifeos:${name}`;
@@ -242,6 +242,29 @@ function nextVisibleTimelineItem(plan, day=selectedDay, afterMinute=null){
   if(afterMinute!==null){ const future=items.find(x=>x.end>afterMinute); if(future)return future; }
   return items[0]||null;
 }
+
+function nowTimelineMarkup(plan, day=dateKey(), nowMin=null){
+  const isToday = day === dateKey();
+  const currentMin = nowMin ?? (()=>{ const n=new Date(); return n.getHours()*60+n.getMinutes(); })();
+  const visible = (plan.timeline||[])
+    .slice()
+    .sort((a,b)=>(a.start-b.start)||(a.end-b.end));
+  const rows = visible.map(x=>{
+    const mins = Math.max(0, Math.round(x.end-x.start));
+    const completed = isItemCompleted(x, day);
+    let status = 'future';
+    let label = '予定';
+    if (completed || (isToday && x.end <= currentMin)) { status = 'past'; label = completed ? '完了' : '終了'; }
+    if (!completed && isToday && x.start <= currentMin && currentMin < x.end) { status = 'current'; label = '今ここ'; }
+    const amount = x.type==='task' && x.pages ? `${x.pages}ページ ・ ${minutesLabel(mins)}目安` : minutesLabel(mins);
+    const fixed = x.movable===false ? ' ・ 固定' : '';
+    return `<div class="timeline-item now-row ${esc(x.type||'event')} ${status}"><div class="time">${timeLabel(x.start)}<br><span>${timeLabel(x.end)}</span></div><div class="timeline-body"><strong>${esc(x.title)}</strong><small>${amount}${fixed}</small></div><span class="now-status ${status}">${label}</span></div>`;
+  }).join('');
+  const current = visible.find(x => !isItemCompleted(x, day) && isToday && x.start <= currentMin && currentMin < x.end);
+  const next = visible.find(x => !isItemCompleted(x, day) && (!isToday || x.end > currentMin));
+  const focusText = current ? `現在：${current.title}` : next ? `次：${next.title}` : '今日の予定は完了または未登録';
+  return `<section class="card now-schedule-card"><div class="row between now-clock-row"><div><p class="eyebrow">TODAY TIMELINE</p><h3>今日の予定一覧</h3></div><div class="now-clock"><span>現在時刻</span><strong id="nowClockText">${hhmm()}</strong></div></div><p class="muted now-focus-line">${esc(focusText)}</p><div class="timeline now-timeline">${rows || '<p class="muted">予定・課題がまだありません。</p>'}</div><p class="muted timeline-legend"><span class="legend past">終了/完了</span><span class="legend current">今の予定</span><span class="legend future">今後</span></p></section>`;
+}
 function currentRisks(){ return forecastDeadlineRisks({fromDay:dateKey(),tasks,events:planningEventsForForecast(dateKey(),settings.forecastDays),overrides,settings,dayModes,dayStates,dailySleepPlans,wakeRecords,maxDays:settings.forecastDays}); }
 
 function riskBadge(r){ if(!r) return ''; const label={green:'順調',yellow:'注意',orange:'厳しい',red:'要調整'}[r.level]; return `<span class="risk-badge ${r.level}">${label}</span>`; }
@@ -394,17 +417,19 @@ function renderNow(){
   const now = new Date(); const nowMin=now.getHours()*60+now.getMinutes();
   const nextTask = nextPendingWorkItem(plan, dateKey(), nowMin);
   const motivationHtml = motivationPanel(dateKey(), plan);
+  const todayTimelineHtml = nowTimelineMarkup(plan, dateKey(), nowMin);
   if (activeSession) {
     const elapsed = Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000));
-    $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen"><p class="eyebrow">ACTIVE SESSION</p><h2>${esc(activeSession.title)}</h2><div class="focus-big">${activeSession.plannedPages ? `${activeSession.plannedPages}ページ` : activeSession.taskId ? minutesLabel(activeSession.plannedMinutes||0) : '生活タスク'}</div><p class="focus-timer" id="focusTimer">${minutesLabel(elapsed)}</p><div class="focus-actions"><button id="finishSession" class="primary">完了</button><button id="partialSession" class="secondary">途中終了</button><button id="cancelSession" class="ghost">中断（記録しない）</button></div><p class="muted">開始後はここだけ見ればOK。ページ学習なら実績から速度も自動学習します。</p></div>`;
+    $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen compact-focus"><p class="eyebrow">ACTIVE SESSION</p><h2>${esc(activeSession.title)}</h2><div class="focus-big">${activeSession.plannedPages ? `${activeSession.plannedPages}ページ` : activeSession.taskId ? minutesLabel(activeSession.plannedMinutes||0) : '生活タスク'}</div><p class="focus-timer" id="focusTimer">${minutesLabel(elapsed)}</p><div class="focus-actions"><button id="finishSession" class="primary">完了</button><button id="partialSession" class="secondary">途中終了</button><button id="cancelSession" class="ghost">中断（記録しない）</button></div><p class="muted">開始後はここだけ見ればOK。下に今日の流れも出ます。</p></div>${todayTimelineHtml}`;
     $('finishSession').onclick=()=>finishActiveSession(false); $('partialSession').onclick=()=>finishActiveSession(true); $('cancelSession').onclick=()=>{ if(confirm('このセッションを記録せず中断しますか？')){const ended=new Date().toISOString(),session={...activeSession};recordOperation('session_cancelled','セッションを中断',{taskId:session.taskId||null,taskTitle:session.title,startedAt:session.startedAt,endedAt:ended,elapsedMinutes:Math.max(1,Math.round((Date.now()-new Date(session.startedAt))/60000))},session.day);activeSession=null;persist();renderNow();} };
-    clearInterval(sessionTimer); sessionTimer=setInterval(()=>{ const el=$('focusTimer'); if(el&&activeSession) el.textContent=minutesLabel(Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000))); },15000);
+    clearInterval(sessionTimer); sessionTimer=setInterval(()=>{ const el=$('focusTimer'); if(el&&activeSession) el.textContent=minutesLabel(Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000))); const clock=$('nowClockText'); if(clock) clock.textContent=hhmm(); },15000);
     return;
   }
   clearInterval(sessionTimer);
-  $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen"><p class="eyebrow">NEXT ACTION</p>${nextTask ? `<h2>${esc(nextTask.title)}</h2><div class="focus-big">${nextTask.pages ? `${nextTask.pages}ページ` : minutesLabel(nextTask.end-nextTask.start)}</div><p class="muted">${timeLabel(nextTask.start)}–${timeLabel(nextTask.end)}${nextTask.movable===false?' ・ 固定':''}</p><button id="startNext" class="primary focus-start">START</button>` : '<h2>今やる課題はありません</h2><p class="muted">今日の必要分が終わっているか、課題が未登録です。</p>'}</div>`;
+  $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen compact-focus"><div class="row between focus-head"><p class="eyebrow">NEXT ACTION</p><div class="focus-now"><span>現在</span><strong>${hhmm()}</strong></div></div>${nextTask ? `<h2>${esc(nextTask.title)}</h2><div class="focus-big">${nextTask.pages ? `${nextTask.pages}ページ` : minutesLabel(nextTask.end-nextTask.start)}</div><p class="muted">${timeLabel(nextTask.start)}–${timeLabel(nextTask.end)}${nextTask.movable===false?' ・ 固定':''}</p><button id="startNext" class="primary focus-start">START</button>` : '<h2>今やる課題はありません</h2><p class="muted">今日の必要分が終わっているか、課題が未登録です。</p>'}</div>${todayTimelineHtml}`;
   if($('startNext')) $('startNext').onclick=()=>startSession(nextTask);
   document.querySelectorAll('.completeChallenge').forEach(b=>b.onclick=()=>completeChallenge(dateKey()));
+  sessionTimer=setInterval(()=>renderNow(),60000);
 }
 function startSession(item){
   if(!item) return; if(activeSession && !confirm('現在のセッションを置き換えますか？')) return;
