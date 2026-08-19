@@ -1,7 +1,7 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.5.9';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.1';
 
-const APP_VERSION = '1.5.9';
-const DATA_SCHEMA_VERSION = 15;
+const APP_VERSION = '1.6.1';
+const DATA_SCHEMA_VERSION = 17;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const K = (name) => `lifeos:${name}`;
@@ -227,10 +227,17 @@ function plannedSleepMinutes(day){
 function currentPlan(day=selectedDay){ return generateDayPlan({day,tasks,events:planningEventsForDay(day),overrides,settings:effectiveSettingsForDay(day),classDayOverride:dayModes[day]||'auto',energyState:dayStates[day]||'normal'}); }
 function morningTrainingTotal(){ const m=settings.morningTraining||{}; const total=['coreLowerMinutes','suburiMinutes','stretchMinutes','showerMinutes'].reduce((sum,k)=>sum+Math.max(0,Number(m[k]||0)),0); return total + (m.breakfastEnabled===false?0:Math.max(0,Number(m.breakfastMinutes||0))); }
 function completionKeyForItem(item){ return `${item.type}:${item.taskId||item.title}:${Math.round(item.start)}:${Math.round(item.end)}`; }
-function isItemCompleted(item, day=selectedDay){
-  if(!item || (item.type!=='task' && item.type!=='life')) return false;
+function completionLogForItem(item, day=selectedDay){
+  if(!item || (item.type!=='task' && item.type!=='life')) return null;
   const key=completionKeyForItem(item);
-  return activityLog.some(a=>a.date===day && (a.key===key || (item.type==='life' && a.kind==='life' && a.title===item.title)));
+  return activityLog.find(a=>a.date===day && (a.key===key || (item.type==='life' && a.kind==='life' && a.title===item.title))) || null;
+}
+function isItemCompleted(item, day=selectedDay){
+  return Boolean(completionLogForItem(item, day));
+}
+function calcCompletionExp(kind='task', pages=0, minutes=0){
+  const p=Number(pages||0), m=Number(minutes||0);
+  return kind==='life' ? Math.max(15,Math.round(m*0.8)) : p>0 ? Math.max(20,Math.round(p*6 + m*0.35)) : Math.max(20,Math.round(m*1.1));
 }
 function nextPendingWorkItem(plan, day=selectedDay, afterMinute=null){
   const items=(plan.timeline||[]).filter(x=>(x.type==='task'||x.type==='life')&&!isItemCompleted(x,day));
@@ -271,17 +278,44 @@ function riskBadge(r){ if(!r) return ''; const label={green:'順調',yellow:'注
 function deadlineLabel(t){ return `${t.deadline}${t.deadlineTime ? ' ' + t.deadlineTime : ''}`; }
 
 
+
 const TITLE_DEFS = [
-  { id:'wake_first', name:'朝を制御し始めた者', desc:'起床をLife OSに記録した' },
-  { id:'first_action', name:'最初の一手を打った者', desc:'作業か生活タスクを初めて完了した' },
-  { id:'page_100', name:'知識の開拓者', desc:'累計100ページを突破' },
-  { id:'page_500', name:'積み上げの証明者', desc:'累計500ページを突破' },
-  { id:'life_7', name:'生活基盤の守護者', desc:'生活タスクを7回完了' },
-  { id:'mission_clear', name:'今日を回収した者', desc:'今日の3ミッションを達成' },
-  { id:'recovery', name:'復帰できる人間', desc:'崩れた翌日に戻ってきた' },
-  { id:'boss_finisher', name:'締切を倒す者', desc:'課題・タスクを完了状態まで持っていった' },
-  { id:'challenge_clear', name:'小さな挑戦を拾う者', desc:'挑戦カードを達成した' },
-  { id:'closeout_first', name:'一日を閉じられる者', desc:'夜の終了処理を完了' },
+  { id:'exp_0', exp:0, tier:'START', name:'挑戦者', desc:'Life OSを起動した最初の段階' },
+  { id:'exp_50', exp:50, tier:'I', name:'最初の一歩を踏み出した者', desc:'累計50EXP到達' },
+  { id:'exp_120', exp:120, tier:'I', name:'動き始めた者', desc:'累計120EXP到達' },
+  { id:'exp_250', exp:250, tier:'I', name:'積み上げを知った者', desc:'累計250EXP到達' },
+  { id:'exp_400', exp:400, tier:'I', name:'生活を回し始めた者', desc:'累計400EXP到達' },
+  { id:'exp_600', exp:600, tier:'I', name:'今日を整える者', desc:'累計600EXP到達' },
+  { id:'exp_900', exp:900, tier:'II', name:'習慣の入口に立つ者', desc:'累計900EXP到達' },
+  { id:'exp_1300', exp:1300, tier:'II', name:'継続の感覚を掴んだ者', desc:'累計1300EXP到達' },
+  { id:'exp_1800', exp:1800, tier:'II', name:'日々を進める者', desc:'累計1800EXP到達' },
+  { id:'exp_2400', exp:2400, tier:'II', name:'自分を運用し始めた者', desc:'累計2400EXP到達' },
+  { id:'exp_3200', exp:3200, tier:'II', name:'積み上げの実践者', desc:'累計3200EXP到達' },
+  { id:'exp_4200', exp:4200, tier:'II', name:'一日を支配し始めた者', desc:'累計4200EXP到達' },
+  { id:'exp_5500', exp:5500, tier:'III', name:'継続を設計する者', desc:'累計5500EXP到達' },
+  { id:'exp_7000', exp:7000, tier:'III', name:'日常を制御する者', desc:'累計7000EXP到達' },
+  { id:'exp_9000', exp:9000, tier:'III', name:'進捗を積み上げる者', desc:'累計9000EXP到達' },
+  { id:'exp_11500', exp:11500, tier:'III', name:'やるべきことを回収する者', desc:'累計11500EXP到達' },
+  { id:'exp_14500', exp:14500, tier:'III', name:'生活と学習を両立する者', desc:'累計14500EXP到達' },
+  { id:'exp_18000', exp:18000, tier:'III', name:'自分の基盤を築く者', desc:'累計18000EXP到達' },
+  { id:'exp_22000', exp:22000, tier:'IV', name:'努力を習慣に変える者', desc:'累計22000EXP到達' },
+  { id:'exp_27000', exp:27000, tier:'IV', name:'予定を動かす者', desc:'累計27000EXP到達' },
+  { id:'exp_33000', exp:33000, tier:'IV', name:'継続の体現者', desc:'累計33000EXP到達' },
+  { id:'exp_40000', exp:40000, tier:'IV', name:'自己運用の熟練者', desc:'累計40000EXP到達' },
+  { id:'exp_48000', exp:48000, tier:'IV', name:'日々を積み重ねる者', desc:'累計48000EXP到達' },
+  { id:'exp_57000', exp:57000, tier:'IV', name:'生活を支える者', desc:'累計57000EXP到達' },
+  { id:'exp_67000', exp:67000, tier:'V', name:'自分を律する者', desc:'累計67000EXP到達' },
+  { id:'exp_78000', exp:78000, tier:'V', name:'一日を掌握する者', desc:'累計78000EXP到達' },
+  { id:'exp_90000', exp:90000, tier:'V', name:'積み上げの達人', desc:'累計90000EXP到達' },
+  { id:'exp_105000', exp:105000, tier:'V', name:'継続の剣士', desc:'累計105000EXP到達' },
+  { id:'exp_122000', exp:122000, tier:'V', name:'自分を超え続ける者', desc:'累計122000EXP到達' },
+  { id:'exp_140000', exp:140000, tier:'V', name:'Life OSの使い手', desc:'累計140000EXP到達' },
+  { id:'exp_160000', exp:160000, tier:'LEGEND', name:'今日を支配する者', desc:'累計160000EXP到達' },
+  { id:'exp_185000', exp:185000, tier:'LEGEND', name:'継続を武器にする者', desc:'累計185000EXP到達' },
+  { id:'exp_210000', exp:210000, tier:'LEGEND', name:'自分を動かし続ける者', desc:'累計210000EXP到達' },
+  { id:'exp_240000', exp:240000, tier:'LEGEND', name:'積み上げの支配者', desc:'累計240000EXP到達' },
+  { id:'exp_275000', exp:275000, tier:'LEGEND', name:'人生を運用する者', desc:'累計275000EXP到達' },
+  { id:'exp_320000', exp:320000, tier:'LEGEND', name:'自己鍛錬の体現者', desc:'累計320000EXP到達' },
 ];
 function normalizeMotivation(m=null){
   const x=m||{};
@@ -298,10 +332,25 @@ function normalizeMotivation(m=null){
 }
 function levelForExp(exp=motivation.exp){return Math.max(1,Math.floor(Math.sqrt(Math.max(0,Number(exp||0))/120))+1);}
 function expForLevel(level){return Math.round(120*Math.pow(Math.max(0,level-1),2));}
+function expTitleIds(exp=motivation.exp){
+  const v=Math.max(0,Number(exp||0));
+  return TITLE_DEFS.filter(t=>Number(t.exp)<=v).map(t=>t.id);
+}
+function currentTitleForExp(exp=motivation.exp){
+  const v=Math.max(0,Number(exp||0));
+  return [...TITLE_DEFS].reverse().find(t=>Number(t.exp)<=v) || TITLE_DEFS[0];
+}
+function nextTitleForExp(exp=motivation.exp){
+  const v=Math.max(0,Number(exp||0));
+  return TITLE_DEFS.find(t=>Number(t.exp)>v) || null;
+}
 function motivationStats(){
-  const level=levelForExp(); const current=expForLevel(level), next=expForLevel(level+1), inLevel=Math.max(0,motivation.exp-current), need=Math.max(1,next-current);
-  const currentTitle=[...TITLE_DEFS].reverse().find(t=>motivation.titleIds.includes(t.id)) || {name:'挑戦者',desc:'これから積み上げる'};
-  return {level,exp:Math.round(motivation.exp),current,next,progress:Math.min(100,Math.round(inLevel/need*100)),nextNeed:Math.max(0,next-motivation.exp),currentTitle};
+  const exp=Math.round(Math.max(0,Number(motivation.exp||0)));
+  const level=levelForExp(exp), current=expForLevel(level), next=expForLevel(level+1), inLevel=Math.max(0,exp-current), need=Math.max(1,next-current);
+  const currentTitle=currentTitleForExp(exp), nextTitle=nextTitleForExp(exp), prevExp=Number(currentTitle?.exp||0), nextExp=nextTitle?Number(nextTitle.exp):exp;
+  const titleSpan=Math.max(1,nextExp-prevExp), titleProgress=nextTitle?Math.min(100,Math.round((exp-prevExp)/titleSpan*100)):100;
+  motivation.titleIds=expTitleIds(exp);
+  return {level,exp,current,next,levelProgress:Math.min(100,Math.round(inLevel/need*100)),progress:titleProgress,nextNeed:nextTitle?Math.max(0,nextExp-exp):0,currentTitle,nextTitle,titleIds:motivation.titleIds};
 }
 function totalDonePages(){return activityLog.filter(a=>a.kind==='task').reduce((s,a)=>s+Number(a.pages||0),0);}
 function totalDoneTaskMinutes(){return activityLog.filter(a=>a.kind==='task').reduce((s,a)=>s+Number(a.minutes||0),0);}
@@ -310,32 +359,35 @@ function addVictory(title,details={},day=dateKey()){
   motivation.victories.unshift({id:uid(),day,createdAt:new Date().toISOString(),title:String(title||'勝利'),details});
   motivation.victories=motivation.victories.slice(0,80);
 }
+function syncExpTitles(beforeExp=motivation.exp, afterExp=motivation.exp, day=dateKey()){
+  const before=new Set(expTitleIds(beforeExp));
+  const afterTitles=TITLE_DEFS.filter(t=>Number(t.exp)<=Number(afterExp||0));
+  motivation.titleIds=afterTitles.map(t=>t.id);
+  for(const def of afterTitles){
+    if(before.has(def.id)) continue;
+    motivation.titleEvents.unshift({id:uid(),titleId:def.id,title:def.name,day,createdAt:new Date().toISOString(),exp:def.exp,tier:def.tier});
+    recordOperation('title_unlocked',`称号獲得｜${def.name}`,{titleId:def.id,title:def.name,exp:def.exp,tier:def.tier},day);
+    addVictory(`NEW TITLE｜${def.name}`,{titleId:def.id,exp:def.exp,tier:def.tier},day);
+    if(def.exp>0) notice(`称号獲得：${def.name}`);
+  }
+  motivation.titleEvents=(motivation.titleEvents||[]).slice(0,120);
+}
 function unlockTitle(id,day=dateKey()){
-  if(motivation.titleIds.includes(id)) return false;
-  const def=TITLE_DEFS.find(t=>t.id===id); if(!def) return false;
-  motivation.titleIds.push(id); motivation.titleEvents.unshift({id:uid(),titleId:id,title:def.name,day,createdAt:new Date().toISOString()});
-  recordOperation('title_unlocked',`称号獲得｜${def.name}`,{titleId:id,title:def.name},day);
-  addVictory(`称号「${def.name}」を獲得`,{titleId:id},day);
-  notice(`称号獲得：${def.name}`);
-  return true;
+  // v1.6.1以降、称号は累計EXPだけで解放する。旧条件ベースの呼び出しは記録しない。
+  syncExpTitles(motivation.exp,motivation.exp,day);
+  return false;
 }
 function awardExp(points,reason,details={},day=dateKey()){
   const add=Math.max(0,Math.round(Number(points||0))); if(!add) return;
-  const before=levelForExp(); motivation.exp=Math.max(0,Math.round(motivation.exp+add)); const after=levelForExp();
+  const beforeExp=Math.max(0,Number(motivation.exp||0));
+  const before=levelForExp(beforeExp); motivation.exp=Math.max(0,Math.round(beforeExp+add)); const after=levelForExp(motivation.exp);
   recordOperation('exp_awarded',`EXP +${add}｜${reason}`,{beforeLevel:before,afterLevel:after,totalExp:motivation.exp,...details},day);
   if(after>before){addVictory(`Level ${after} に到達`,{beforeLevel:before,afterLevel:after},day); notice(`Level ${after} に上がった`);}
+  syncExpTitles(beforeExp,motivation.exp,day);
 }
 function evaluateTitles(day=dateKey(),extra={}){
-  if(Object.keys(wakeRecords||{}).length>0) unlockTitle('wake_first',day);
-  if(activityLog.some(a=>a.kind==='task'||a.kind==='life')) unlockTitle('first_action',day);
-  if(totalDonePages()>=100) unlockTitle('page_100',day);
-  if(totalDonePages()>=500) unlockTitle('page_500',day);
-  if(lifeDoneCount()>=7) unlockTitle('life_7',day);
-  if(Object.keys(closeouts||{}).length>0) unlockTitle('closeout_first',day);
-  if(extra.taskCompleted) unlockTitle('boss_finisher',day);
-  const yesterday=addDays(day,-1), yesterdayActivity=activityLog.some(a=>a.date===yesterday&&(a.kind==='task'||a.kind==='life')), yesterdayPlanned=Boolean(planSnapshots[yesterday]||wakeRecords[yesterday]);
-  const todayActivity=activityLog.some(a=>a.date===day&&(a.kind==='task'||a.kind==='life'));
-  if(yesterdayPlanned&&!yesterdayActivity&&todayActivity) unlockTitle('recovery',day);
+  // v1.6.1以降の称号判定はEXPのみ。起床・ページ数・生活回数などの個別条件は使わない。
+  syncExpTitles(motivation.exp,motivation.exp,day);
 }
 function dayDoneStats(day,plan){
   const logs=activityLog.filter(a=>a.date===day);
@@ -367,7 +419,7 @@ function dailyMissions(day,plan){
 function checkMissionBonus(day=dateKey(),plan=planSnapshots[day]||currentPlan(day)){
   const missions=dailyMissions(day,plan);
   if(missions.length && missions.every(m=>m.done) && !motivation.missionBonusDays.includes(day)){
-    motivation.missionBonusDays.push(day); awardExp(60,'今日の3ミッション達成',{day},day); unlockTitle('mission_clear',day); addVictory('今日の3ミッションを回収',{missions:missions.map(m=>m.label)},day);
+    motivation.missionBonusDays.push(day); awardExp(60,'今日の3ミッション達成',{day},day); addVictory('今日の3ミッションを回収',{missions:missions.map(m=>m.label)},day);
   }
 }
 function dailyChallenge(day=dateKey()){
@@ -382,7 +434,7 @@ function dailyChallenge(day=dateKey()){
 }
 function completeChallenge(day=dateKey()){
   if(motivation.challengeBonusDays.includes(day)) return;
-  const ch=dailyChallenge(day); motivation.challengeBonusDays.push(day); awardExp(35,`挑戦カード達成｜${ch.title}`,{challengeId:ch.id},day); unlockTitle('challenge_clear',day); addVictory(`挑戦カード達成：${ch.title}`,{challengeId:ch.id},day); persist(); renderAll();
+  const ch=dailyChallenge(day); motivation.challengeBonusDays.push(day); awardExp(35,`挑戦カード達成｜${ch.title}`,{challengeId:ch.id},day); addVictory(`挑戦カード達成：${ch.title}`,{challengeId:ch.id},day); persist(); renderAll();
 }
 function heatPercent(day,plan){
   const s=dayDoneStats(day,plan); const wake=Boolean(wakeRecords[day]);
@@ -392,7 +444,8 @@ function heatPercent(day,plan){
 function motivationPanel(day=dateKey(),plan=currentPlan(day)){
   const st=motivationStats(), heat=heatPercent(day,plan), missions=dailyMissions(day,plan), ch=dailyChallenge(day), doneChallenge=motivation.challengeBonusDays.includes(day);
   const missionHtml=missions.map(m=>`<li class="${m.done?'done':''}"><span>${m.done?'✓':'□'}</span>${esc(m.label)}</li>`).join('');
-  return `<section class="card motivation-card"><div class="row between"><div><p class="eyebrow">MISSION / EXP</p><h2>Level ${st.level}｜${esc(st.currentTitle.name)}</h2></div><strong class="heat-badge">熱量 ${heat}%</strong></div><div class="exp-bar"><span style="width:${st.progress}%"></span></div><p class="muted">${st.exp} EXP ・ 次のLevelまで ${Math.round(st.nextNeed)} EXP</p><ul class="mission-list">${missionHtml}</ul><div class="challenge-card ${doneChallenge?'done':''}"><div><strong>挑戦カード：${esc(ch.title)}</strong><small>${esc(ch.desc)}</small></div>${doneChallenge?'<span class="done-mark">達成済み</span>':day===dateKey()?'<button class="secondary small completeChallenge">達成</button>':''}</div></section>`;
+  const nextText = st.nextTitle ? `次の称号「${st.nextTitle.name}」まで ${Math.round(st.nextNeed)} EXP` : '最高位称号に到達';
+  return `<section class="card motivation-card command-card"><div class="row between"><div><p class="eyebrow">MISSION / EXP</p><h2>${esc(st.currentTitle.name)}</h2><p class="muted compact-note">Level ${st.level} ・ 累計 ${st.exp} EXP</p></div><strong class="heat-badge">熱量 ${heat}%</strong></div><div class="exp-title-row"><span>${esc(st.currentTitle.tier||'')}</span><strong>${esc(st.currentTitle.name)}</strong>${st.nextTitle?`<span>NEXT ${esc(st.nextTitle.tier||'')}</span>`:''}</div><div class="exp-bar title-progress"><span style="width:${st.progress}%"></span></div><p class="muted">${esc(nextText)}</p><ul class="mission-list">${missionHtml}</ul><div class="challenge-card ${doneChallenge?'done':''}"><div><strong>挑戦カード：${esc(ch.title)}</strong><small>${esc(ch.desc)}</small></div>${doneChallenge?'<span class="done-mark">達成済み</span>':day===dateKey()?'<button class="secondary small completeChallenge">達成</button>':''}</div></section>`;
 }
 function bossCardsHtml(){
   const active=tasks.filter(t=>t.status!=='paused' && (Number(t.remainingPages||0)>0||Number(t.remainingMinutes||0)>0)).sort((a,b)=>String(a.deadline).localeCompare(String(b.deadline))).slice(0,6);
@@ -459,25 +512,77 @@ function finishActiveSession(partial){
 }
 function recordCompletion({taskId,title,kind='task',pages=0,minutes=0,completeTimeTask=false,key,source='manual',date=selectedDay||dateKey()}){
   if(key && activityLog.some(a=>a.key===key)) return;
+  let previousRemainingPages=null, afterRemainingPages=null, previousRemainingMinutes=null, afterRemainingMinutes=null;
   if(kind==='task'&&taskId){
     tasks=tasks.map(t=>{
       if(t.id!==taskId)return t;
-      if(Number.isFinite(Number(t.remainingPages))) return {...t,remainingPages:Math.max(0,Number(t.remainingPages||0)-Number(pages||0))};
-      if(Number.isFinite(Number(t.remainingMinutes))) return {...t,remainingMinutes:completeTimeTask?0:Math.max(0,Number(t.remainingMinutes||0)-Number(minutes||0))};
+      if(Number.isFinite(Number(t.remainingPages))) {
+        previousRemainingPages=Number(t.remainingPages||0);
+        afterRemainingPages=Math.max(0,previousRemainingPages-Number(pages||0));
+        return {...t,remainingPages:afterRemainingPages};
+      }
+      if(Number.isFinite(Number(t.remainingMinutes))) {
+        previousRemainingMinutes=Number(t.remainingMinutes||0);
+        afterRemainingMinutes=completeTimeTask?0:Math.max(0,previousRemainingMinutes-Number(minutes||0));
+        return {...t,remainingMinutes:afterRemainingMinutes};
+      }
       return t;
     });
   }
   const completedAt=new Date().toISOString();
-  activityLog.unshift({id:uid(),date,completedAt,kind,taskId:taskId||null,title,minutes:Number(minutes||0),pages:Number(pages||0),completeTimeTask:Boolean(completeTimeTask),key:key||uid(),source});
-  const expGain = kind==='life' ? Math.max(15,Math.round(Number(minutes||0)*0.8)) : Number(pages||0)>0 ? Math.max(20,Math.round(Number(pages||0)*6 + Number(minutes||0)*0.35)) : Math.max(20,Math.round(Number(minutes||0)*1.1));
-  awardExp(expGain, kind==='life'?'生活タスク完了':'作業完了',{taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0)},date);
-  addVictory(kind==='life'?`${title}を回収`:`${title}を進めた`,{taskId:taskId||null,pages:Number(pages||0),minutes:Number(minutes||0)},date);
+  const logId=uid();
+  const expGain = calcCompletionExp(kind, pages, minutes);
+  activityLog.unshift({id:logId,date,completedAt,kind,taskId:taskId||null,title,minutes:Number(minutes||0),pages:Number(pages||0),completeTimeTask:Boolean(completeTimeTask),key:key||uid(),source,expGain,previousRemainingPages,afterRemainingPages,previousRemainingMinutes,afterRemainingMinutes,reversible:true});
+  awardExp(expGain, kind==='life'?'生活タスク完了':'作業完了',{activityId:logId,taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0)},date);
+  addVictory(kind==='life'?`${title}を回収`:`${title}を進めた`,{activityId:logId,taskId:taskId||null,pages:Number(pages||0),minutes:Number(minutes||0)},date);
   const completedTask = taskId ? tasks.find(t=>t.id===taskId) : null;
   evaluateTitles(date,{taskCompleted:Boolean(completedTask && (Number(completedTask.remainingPages||0)<=0 || Number(completedTask.remainingMinutes||0)<=0 || completeTimeTask))});
   checkMissionBonus(date, planSnapshots[date]||currentPlan(date));
-  if(source!=='session') recordOperation(kind==='life'?'life_completed':'task_progress_recorded',kind==='life'?`${title}を完了`:'作業実績を記録',{taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0),completeTimeTask:Boolean(completeTimeTask),source,completedAt},date);
+  if(source!=='session') recordOperation(kind==='life'?'life_completed':'task_progress_recorded',kind==='life'?`${title}を完了`:'作業実績を記録',{activityId:logId,taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0),completeTimeTask:Boolean(completeTimeTask),source,completedAt,expGain},date);
   if(taskId) recomputeTaskSpeed(taskId);
   persist();
+}
+function undoCompletion(logId){
+  const log=activityLog.find(a=>a.id===logId);
+  if(!log) return notice('戻す対象が見つかりません。');
+  if(!(log.kind==='task'||log.kind==='life')) return notice('この記録は未完了に戻せません。');
+  if(!confirm(`「${log.title}」を未完了に戻しますか？\nEXPと残量も戻します。`)) return;
+  const expBack=Number.isFinite(Number(log.expGain)) ? Number(log.expGain) : calcCompletionExp(log.kind, log.pages, log.minutes);
+  if(log.kind==='task' && log.taskId){
+    tasks=tasks.map(t=>{
+      if(t.id!==log.taskId) return t;
+      if(Number.isFinite(Number(t.remainingPages))){
+        const restored=Number.isFinite(Number(log.previousRemainingPages)) ? Number(log.previousRemainingPages) : Number(t.remainingPages||0)+Number(log.pages||0);
+        const cap=Number.isFinite(Number(t.initialPages)) ? Number(t.initialPages) : restored;
+        return {...t,remainingPages:Math.max(0,Math.min(cap,restored))};
+      }
+      if(Number.isFinite(Number(t.remainingMinutes))){
+        const restored=Number.isFinite(Number(log.previousRemainingMinutes)) ? Number(log.previousRemainingMinutes) : Number(t.remainingMinutes||0)+Number(log.minutes||0);
+        const cap=Number.isFinite(Number(t.initialMinutes)) ? Number(t.initialMinutes) : restored;
+        return {...t,remainingMinutes:Math.max(0,Math.min(cap,restored))};
+      }
+      return t;
+    });
+  }
+  activityLog=activityLog.filter(a=>a.id!==logId);
+  motivation.exp=Math.max(0,Math.round(Number(motivation.exp||0)-Math.max(0,Math.round(expBack))));
+  motivation.victories=(motivation.victories||[]).filter(v=>v.details?.activityId!==logId);
+  // 3ミッション達成ボーナスが、この取り消しで成立しなくなった場合はEXPも戻す。
+  if(motivation.missionBonusDays.includes(log.date)){
+    const missions=dailyMissions(log.date,planSnapshots[log.date]||currentPlan(log.date));
+    if(!missions.every(m=>m.done)){
+      motivation.missionBonusDays=motivation.missionBonusDays.filter(d=>d!==log.date);
+      motivation.exp=Math.max(0,Math.round(Number(motivation.exp||0)-60));
+      motivation.victories=(motivation.victories||[]).filter(v=>!(v.day===log.date && String(v.title||'').includes('3ミッション')));
+      recordOperation('mission_bonus_rolled_back','3ミッション達成ボーナスを取り消し',{activityId:logId,expBack:60},log.date);
+    }
+  }
+  syncExpTitles(motivation.exp,motivation.exp,log.date);
+  recordOperation('completion_undone','完了記録を未完了に戻した',{activityId:logId,taskId:log.taskId||null,taskTitle:log.title,pages:Number(log.pages||0),minutes:Number(log.minutes||0),expBack},log.date);
+  if(log.taskId) recomputeTaskSpeed(log.taskId);
+  persist();
+  renderAll();
+  notice(`未完了に戻しました。EXP -${Math.round(expBack)}。`);
 }
 function recomputeTaskSpeed(taskId){
   const t=tasks.find(x=>x.id===taskId); if(!t) return;
@@ -507,8 +612,10 @@ function renderToday(){
   const timeline=plan.timeline.map(x=>{
     const mins=x.end-x.start, completionKey=completionKeyForItem(x);
     const recorded=isItemCompleted(x,selectedDay); let action='';
-    if(x.type==='task') action=recorded?'<span class="done-mark">記録済み</span>':`<button class="done-btn" data-task-id="${esc(x.taskId||'')}" data-mins="${mins}" data-pages="${Number(x.pages||0)}" data-kind="task" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">実績</button>`;
-    if(x.type==='life') action=recorded?'<span class="done-mark">完了済み</span>':`<button class="done-btn" data-mins="${mins}" data-pages="0" data-kind="life" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">完了</button>`;
+    const completedLog = completionLogForItem(x, selectedDay);
+    const undoAction = completedLog ? `<button class="undo-btn" data-log-id="${esc(completedLog.id)}">未完了に戻す</button>` : '';
+    if(x.type==='task') action=recorded?`<div class="done-actions"><span class="done-mark">記録済み</span>${undoAction}</div>`:`<button class="done-btn" data-task-id="${esc(x.taskId||'')}" data-mins="${mins}" data-pages="${Number(x.pages||0)}" data-kind="task" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">実績</button>`;
+    if(x.type==='life') action=recorded?`<div class="done-actions"><span class="done-mark">完了済み</span>${undoAction}</div>`:`<button class="done-btn" data-mins="${mins}" data-pages="0" data-kind="life" data-title="${esc(x.title)}" data-key="${esc(completionKey)}">完了</button>`;
     const amount=x.type==='task'&&x.pages?`${x.pages}ページ ・ ${minutesLabel(mins)}目安${x.movable===false?' ・ 固定':''}`:minutesLabel(mins);
     return `<div class="timeline-item ${x.type}"><div class="time">${timeLabel(x.start)}<br><span>${timeLabel(x.end)}</span></div><div class="timeline-body"><strong>${esc(x.title)}</strong><small>${amount}</small></div>${action}</div>`;
   }).join('');
@@ -533,6 +640,7 @@ function renderToday(){
     else { let m=prompt('実際に作業した時間（分）',String(plannedMins)); if(m===null)return; m=Math.max(1,Number(m||plannedMins)); const complete=confirm('このタスクは完了しましたか？\nOK＝完了、キャンセル＝途中'); recordCompletion({taskId:id,title:b.dataset.title,minutes:m,completeTimeTask:complete,key:b.dataset.key,source:'manual'}); }
     renderAll();
   });
+  document.querySelectorAll('.undo-btn').forEach(b=>b.onclick=()=>undoCompletion(b.dataset.logId));
   document.querySelectorAll('.resolver').forEach(r=>{let kind='timed';r.querySelectorAll('[data-kind]').forEach(b=>b.onclick=()=>{kind=b.dataset.kind;r.querySelectorAll('[data-kind]').forEach(x=>x.classList.toggle('selected',x===b));r.querySelector('.resolver-fields').classList.toggle('hidden',kind==='memo');});r.querySelector('.resolve-save').onclick=()=>{const eventId=r.dataset.eventId,before=overrides[eventId]||null;overrides[eventId]=kind==='memo'?{kind:'memo'}:{kind:'timed',startTime:r.querySelector('.all-start').value,endTime:r.querySelector('.all-end').value,bufferLevel:r.querySelector('.all-buffer').value};recordOperation('all_day_event_resolved','終日予定の扱いを確定',{eventId,before,after:overrides[eventId]},selectedDay);persist();renderToday();};});
   document.querySelectorAll('.event-buffer-row').forEach(row=>{const sel=row.querySelector('.event-buffer-select'),custom=row.querySelector('.custom-buffer-fields');sel.onchange=()=>{if(sel.value==='custom'){custom.classList.remove('hidden');return;}const eventId=row.dataset.eventId,before=overrides[eventId]||null;if(sel.value==='auto')delete overrides[eventId];else overrides[eventId]={kind:'buffer',bufferLevel:sel.value};recordOperation('event_buffer_changed','予定の前後余白を変更',{eventId,before,after:overrides[eventId]||{kind:'auto'}},selectedDay);persist();renderToday();};row.querySelector('.custom-buffer-save').onclick=()=>{const eventId=row.dataset.eventId,before=overrides[eventId]||null;overrides[eventId]={kind:'bufferCustom',before:Math.max(0,Number(row.querySelector('.custom-before').value||0)),after:Math.max(0,Number(row.querySelector('.custom-after').value||0))};recordOperation('event_buffer_changed','予定の前後余白を変更',{eventId,before,after:overrides[eventId]},selectedDay);persist();renderToday();};});
   document.querySelectorAll('.completeChallenge').forEach(b=>b.onclick=()=>completeChallenge(selectedDay));
@@ -656,18 +764,19 @@ function weeklyReview(){
   return {planned,done,minutes,ratio,top:tasks.find(t=>t.id===topId)?.title||'—',missed:tasks.find(t=>t.id===missId)?.title||'—',advice};
 }
 function renderHistory(){
-  const review=weeklyReview(); const st=motivationStats(); const titleHtml=TITLE_DEFS.filter(t=>motivation.titleIds.includes(t.id)).map(t=>`<span class="title-chip">${esc(t.name)}</span>`).join(''); const victoryHtml=(motivation.victories||[]).slice(0,30).map(v=>{const t=new Date(v.createdAt);const stamp=Number.isNaN(t.getTime())?v.day:t.toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});return `<div class="victory-entry"><time>${esc(stamp)}</time><strong>${esc(v.title)}</strong></div>`;}).join(''); const dates=[...new Set([...Object.keys(planSnapshots),...Object.keys(wakeRecords),...activityLog.map(a=>a.date)])].sort().reverse();
+  const review=weeklyReview(); const st=motivationStats(); const unlocked=new Set(st.titleIds||expTitleIds(st.exp)); const titleHtml=TITLE_DEFS.map(t=>`<span class="title-chip ${unlocked.has(t.id)?'unlocked':'locked'} ${st.currentTitle?.id===t.id?'current':''}"><small>${Number(t.exp).toLocaleString('ja-JP')}EXP</small>${esc(t.name)}</span>`).join(''); const victoryHtml=(motivation.victories||[]).slice(0,30).map(v=>{const t=new Date(v.createdAt);const stamp=Number.isNaN(t.getTime())?v.day:t.toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});return `<div class="victory-entry"><time>${esc(stamp)}</time><strong>${esc(v.title)}</strong></div>`;}).join(''); const dates=[...new Set([...Object.keys(planSnapshots),...Object.keys(wakeRecords),...activityLog.map(a=>a.date)])].sort().reverse();
   const recentOperations=operationLog.slice(0,200).map(op=>{const t=new Date(op.occurredAt);const stamp=Number.isNaN(t.getTime())?'':t.toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});const target=op.targetDate?` ・ 対象 ${esc(op.targetDate)}`:'';return `<div class="operation-entry"><time>${esc(stamp)}</time><div><strong>${esc(op.title)}</strong><small>${esc(op.type)}${target}</small></div></div>`;}).join('');
   const cards=dates.map(day=>{
     const snap=planSnapshots[day], wake=wakeRecords[day], logs=activityLog.filter(a=>a.date===day&&a.kind!=='closeout').sort((a,b)=>String(a.completedAt).localeCompare(String(b.completedAt))), pages=logs.filter(a=>a.kind==='task').reduce((sum,a)=>sum+Number(a.pages||0),0), close=closeouts[day];
-    const entries=logs.map(a=>`<div class="history-entry"><span>${a.kind==='life'?'生活':'作業'}</span><strong>${esc(a.title)}</strong><small>${a.pages?`${a.pages}ページ ・ `:''}${minutesLabel(a.minutes||0)}</small></div>`).join('');
+    const entries=logs.map(a=>`<div class="history-entry"><span>${a.kind==='life'?'生活':'作業'}</span><strong>${esc(a.title)}</strong><small>${a.pages?`${a.pages}ページ ・ `:''}${minutesLabel(a.minutes||0)}${Number(a.expGain||0)?` ・ +${Number(a.expGain||0)}EXP`:''}</small>${(a.kind==='task'||a.kind==='life')?`<button class="undo-btn history-undo" data-log-id="${esc(a.id)}">未完了に戻す</button>`:''}</div>`).join('');
     const mode=snap?`${snap.classDay?'授業日':'授業なし日'} ・ ${snap.energyState==='high'?'元気':snap.energyState==='tired'?'疲れ':'普通'}`:'計画未作成';
     const wakeText=wake?.wakeTime?` ・ 起床実績 ${wake.wakeTime}${wake.plannedWakeTime?`（予定 ${wake.plannedWakeTime}）`:''}`:'';
     const sleepText=snap?.bedTime?` ・ 就寝予定 ${snap.bedTime} → 翌朝 ${snap.nextWakeTime||settings.wakeTime}`:'';
     return `<div class="history-day"><div class="row between"><div><strong class="history-date">${day.replaceAll('-','/')}</strong><small class="history-mode">${mode}${wakeText}${sleepText}</small></div><span class="history-life ${close?'done':''}">${close?'一日終了済み':'未終了'}</span></div><div class="history-metrics"><div><span>予定ページ</span><strong>${Number(snap?.scheduledTaskPages||0)}</strong></div><div><span>完了ページ</span><strong>${pages}</strong></div><div><span>ゆったり予定</span><strong>${minutesLabel(snap?.relaxedMinutes||0)}</strong></div></div><div class="history-entries">${entries||'<p class="muted">完了記録なし</p>'}</div></div>`;
   }).join('');
-  $('historyTab').innerHTML=`<div class="stack"><section class="card motivation-summary"><p class="eyebrow">LIFE LEVEL</p><h2>Level ${st.level}｜${esc(st.currentTitle.name)}</h2><div class="review-metrics"><div><span>EXP</span><strong>${st.exp}</strong></div><div><span>次まで</span><strong>${Math.round(st.nextNeed)}</strong></div><div><span>累計ページ</span><strong>${totalDonePages()}</strong></div></div><div class="exp-bar"><span style="width:${st.progress}%"></span></div><div class="title-list">${titleHtml||'<p class="muted">称号はこれから。</p>'}</div></section><section class="card"><p class="eyebrow">VICTORY LOG</p><h2>勝利ログ</h2><div class="victory-list">${victoryHtml||'<p class="muted">まだ勝利ログはありません。</p>'}</div></section><section class="card weekly-card"><p class="eyebrow">WEEKLY REVIEW</p><h2>直近7日</h2><div class="review-metrics"><div><span>予定</span><strong>${review.planned}頁</strong></div><div><span>実績</span><strong>${review.done}頁</strong></div><div><span>達成率</span><strong>${review.ratio}%</strong></div></div><p><strong>最も進んだ（ページ系）：</strong>${esc(review.top)}</p><p><strong>総作業実績：</strong>${minutesLabel(review.minutes)}</p><p><strong>持ち越しが多い：</strong>${esc(review.missed)}</p><p class="review-advice">${esc(review.advice)}</p></section><section class="card"><h2>記録・バックアップ</h2><div class="backup-actions"><button id="exportBackup" class="primary small">JSONを書き出す</button><label class="file-button">JSONを読み込む<input id="importBackup" type="file" accept="application/json,.json"></label><button id="restoreAutoBackup" class="secondary small">更新前バックアップから復元</button></div><p class="muted">起床実績・作業開始/終了・課題変更・授業変更・睡眠予定・設定変更など、Life OSの状態を変える操作は操作履歴にも保存します。画面を開く・スクロールするだけの操作は記録しません。</p></section><section class="card"><div class="row between"><div><p class="eyebrow">ACTION LOG</p><h2>操作履歴</h2></div><span class="muted">全 ${operationLog.length}件</span></div><p class="muted">表示は最新200件。JSONバックアップとGoogle Drive同期には操作履歴全体を含めます。</p><div class="operation-list">${recentOperations||'<p class="muted">まだ操作履歴はありません。</p>'}</div></section><section class="card"><div class="history-list">${cards||'<p class="muted">まだ記録がありません。</p>'}</div></section></div>`;
+  $('historyTab').innerHTML=`<div class="stack"><section class="card motivation-summary"><p class="eyebrow">LIFE LEVEL</p><h2>Level ${st.level}｜${esc(st.currentTitle.name)}</h2><div class="review-metrics"><div><span>EXP</span><strong>${st.exp}</strong></div><div><span>次称号まで</span><strong>${Math.round(st.nextNeed)}</strong></div><div><span>累計ページ</span><strong>${totalDonePages()}</strong></div></div><div class="exp-bar"><span style="width:${st.progress}%"></span></div><div class="title-list title-road">${titleHtml}</div></section><section class="card"><p class="eyebrow">VICTORY LOG</p><h2>勝利ログ</h2><div class="victory-list">${victoryHtml||'<p class="muted">まだ勝利ログはありません。</p>'}</div></section><section class="card weekly-card"><p class="eyebrow">WEEKLY REVIEW</p><h2>直近7日</h2><div class="review-metrics"><div><span>予定</span><strong>${review.planned}頁</strong></div><div><span>実績</span><strong>${review.done}頁</strong></div><div><span>達成率</span><strong>${review.ratio}%</strong></div></div><p><strong>最も進んだ（ページ系）：</strong>${esc(review.top)}</p><p><strong>総作業実績：</strong>${minutesLabel(review.minutes)}</p><p><strong>持ち越しが多い：</strong>${esc(review.missed)}</p><p class="review-advice">${esc(review.advice)}</p></section><section class="card"><h2>記録・バックアップ</h2><div class="backup-actions"><button id="exportBackup" class="primary small">JSONを書き出す</button><label class="file-button">JSONを読み込む<input id="importBackup" type="file" accept="application/json,.json"></label><button id="restoreAutoBackup" class="secondary small">更新前バックアップから復元</button></div><p class="muted">起床実績・作業開始/終了・課題変更・授業変更・睡眠予定・設定変更など、Life OSの状態を変える操作は操作履歴にも保存します。画面を開く・スクロールするだけの操作は記録しません。</p></section><section class="card"><div class="row between"><div><p class="eyebrow">ACTION LOG</p><h2>操作履歴</h2></div><span class="muted">全 ${operationLog.length}件</span></div><p class="muted">表示は最新200件。JSONバックアップとGoogle Drive同期には操作履歴全体を含めます。</p><div class="operation-list">${recentOperations||'<p class="muted">まだ操作履歴はありません。</p>'}</div></section><section class="card"><div class="history-list">${cards||'<p class="muted">まだ記録がありません。</p>'}</div></section></div>`;
   $('exportBackup').onclick=exportBackup; $('importBackup').onchange=importBackup; $('restoreAutoBackup').onclick=restoreLatestAutomaticBackup;
+  document.querySelectorAll('#historyTab .undo-btn').forEach(b=>b.onclick=()=>undoCompletion(b.dataset.logId));
 }
 
 function exportBackup(){recordOperation('backup_exported','JSONバックアップを書き出し',{appVersion:APP_VERSION,schemaVersion:DATA_SCHEMA_VERSION});persist({cloud:false});const data=buildCloudPayload();const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`life-os-backup-${dateKey()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);renderHistory();}
