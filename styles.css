@@ -337,3 +337,31 @@ input,select,textarea,
   .wake-times{grid-template-columns:1fr 1fr}
   .wake-times strong{font-size:24px!important}
 }
+
+/* v1.6.7: 急な用事フォームと全画面の可読性を強化 */
+.quick-duration-field.hidden,.quick-range-field.hidden{display:none!important}
+.quick-event-card .primary{color:#ffffff!important;font-weight:950!important}
+.quick-event-card input,.quick-event-card select{color:#0f172a!important;background:#ffffff!important;border-color:#cbd5e1!important}
+.quick-event-card label{color:#1f2937!important}
+
+/* 背景色に対して文字が沈まないよう、主要領域を再固定 */
+body,.shell,.card,.plan-editor-card,.timeline-item,.task-row,.idea-row,.history-day,.operation-entry,.victory-entry,.calendar-source-row,.boss-card,.challenge-card,.quick-event-row,.period-row,.course-row,.event-buffer-row,.buffer-card{color:#0f172a!important}
+.card h1,.card h2,.card h3,.card strong,.card label,.timeline-body strong,.task-row strong,.history-day strong,.boss-card strong,.challenge-card strong{color:#0f172a!important}
+.muted,.card small,.timeline-body small,.task-row small,.history-day small{color:#475569!important}
+
+/* 起床予定・現在時刻などの時刻カードは白地に濃色で統一 */
+.wake-times{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0!important}
+.wake-times>div,.focus-now,.now-clock{background:#ffffff!important;border:1px solid #cbd5e1!important;color:#0f172a!important;box-shadow:0 8px 18px rgba(15,23,42,.08)!important}
+.wake-times span,.focus-now span,.now-clock span{color:#475569!important;font-weight:900!important;letter-spacing:.05em!important}
+.wake-times strong,.focus-now strong,.now-clock strong,#nowClockText{color:#0f172a!important;text-shadow:none!important;font-weight:950!important}
+
+/* グラデーション・濃色ボタンは常に白文字 */
+.primary,.tabs button.active,.now-status.current,.heat-badge{color:#ffffff!important;text-shadow:0 1px 1px rgba(0,0,0,.18)!important}
+.primary *,.tabs button.active *,.heat-badge *{color:#ffffff!important}
+
+/* 入力欄はどのカード内でも白背景＋濃い文字 */
+input,select,textarea{background:#ffffff!important;color:#0f172a!important;border-color:#cbd5e1!important}
+input::placeholder,textarea::placeholder{color:#94a3b8!important}
+option{background:#ffffff!important;color:#0f172a!important}
+
+@media(max-width:640px){.wake-times{grid-template-columns:1fr 1fr}.quick-event-card .form-grid.compact{grid-template-columns:1fr}}

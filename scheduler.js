@@ -74,11 +74,26 @@ export function deepDefaults(saved = {}) {
   };
 }
 
+export const DAY_START_MINUTE = 180; // Life OS の1日は 03:00〜27:00。0:00〜2:59は前日の続きとして扱う。
+
 export function dateKey(date = new Date()) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
+  const logical = new Date(date);
+  logical.setMinutes(logical.getMinutes() - DAY_START_MINUTE);
+  const y = logical.getFullYear();
+  const m = String(logical.getMonth() + 1).padStart(2, '0');
+  const d = String(logical.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+
+export function dayMinuteFromClock(text) {
+  const m = toMinutes(text);
+  return m < DAY_START_MINUTE ? m + 1440 : m;
+}
+
+export function dayMinuteFromDate(date = new Date()) {
+  const d = new Date(date);
+  const m = d.getHours() * 60 + d.getMinutes();
+  return m < DAY_START_MINUTE ? m + 1440 : m;
 }
 
 export function addDays(day, n) {
@@ -163,13 +178,18 @@ export function daysUntil(deadline, day) {
 
 function deadlineDate(task) { return String(task?.deadline || '').slice(0, 10); }
 function deadlineTime(task) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(task?.deadlineTime || '')) ? task.deadlineTime : '23:59'; }
-function deadlineMinuteOnDay(task, day) { return deadlineDate(task) === day ? toMinutes(deadlineTime(task)) : null; }
+function deadlineLogicalDay(task) {
+  const d = deadlineDate(task);
+  if (!d) return '';
+  return toMinutes(deadlineTime(task)) < DAY_START_MINUTE ? addDays(d, -1) : d;
+}
+function deadlineMinuteOnDay(task, day) { return deadlineLogicalDay(task) === day ? dayMinuteFromClock(deadlineTime(task)) : null; }
 function daysUntilTask(task, day) {
-  const a = new Date(`${day}T00:00:00`);
+  const a = new Date(`${day}T${timeLabel(DAY_START_MINUTE)}:00`);
   const b = new Date(`${deadlineDate(task)}T${deadlineTime(task)}:00`);
   return Math.max(0.25, Math.ceil((b - a) / 86_400_000));
 }
-function taskExpiredBeforeDay(task, day) { return Boolean(deadlineDate(task)) && deadlineDate(task) < day; }
+function taskExpiredBeforeDay(task, day) { return Boolean(deadlineDate(task)) && deadlineLogicalDay(task) < day; }
 function blocksBeforeDeadline(task, day, blocks) {
   if (taskExpiredBeforeDay(task, day)) return [];
   const due = deadlineMinuteOnDay(task, day);
@@ -286,7 +306,7 @@ function fixedTaskItems(tasks, day) {
   return tasks
     .filter((t) => t.status !== 'paused' && !taskExpiredBeforeDay(t, day) && t.placement === 'datetime' && t.fixedDate === day && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0))
     .map((t) => {
-      const start = toMinutes(t.fixedTime || '09:00');
+      const start = dayMinuteFromClock(t.fixedTime || '09:00');
       const due = deadlineMinuteOnDay(t, day);
       const limit = due === null ? Infinity : due;
       const cap = limit - start;
@@ -311,8 +331,8 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   const dayEvents = eventsForDay(events || [], day);
   const classDay = classDayOverride === 'class' ? true : classDayOverride === 'noClass' ? false : isClassDay(dayEvents, settings);
   const energy = settings.energy?.[energyState] || settings.energy.normal;
-  const wake = toMinutes(settings.wakeTime);
-  let bed = toMinutes(settings.bedTime);
+  const wake = dayMinuteFromClock(settings.wakeTime);
+  let bed = dayMinuteFromClock(settings.bedTime);
   if (bed <= wake) bed += 1440;
 
   const fixedCore = [];
@@ -326,8 +346,9 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
       if (!ov) { allDayPending.push(e); continue; }
       if (ov.kind === 'memo') continue;
       if (ov.kind === 'timed') {
-        const start = toMinutes(ov.startTime);
-        const end = toMinutes(ov.endTime);
+        const start = dayMinuteFromClock(ov.startTime);
+        let end = dayMinuteFromClock(ov.endTime);
+        if (end <= start) end += 1440;
         const buf = settings.buffers[ov.bufferLevel || 'small'] || settings.buffers.small;
         fixedCore.push({ type: 'event', eventId: e.id, title: e.title, start, end, movable: false });
         busyForWork.push({ start: start - buf.before, end: end + buf.after });
