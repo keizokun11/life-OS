@@ -1,6 +1,6 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.1';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.2';
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.6.2';
 const DATA_SCHEMA_VERSION = 17;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
@@ -373,7 +373,7 @@ function syncExpTitles(beforeExp=motivation.exp, afterExp=motivation.exp, day=da
   motivation.titleEvents=(motivation.titleEvents||[]).slice(0,120);
 }
 function unlockTitle(id,day=dateKey()){
-  // v1.6.1以降、称号は累計EXPだけで解放する。旧条件ベースの呼び出しは記録しない。
+  // v1.6.2以降、称号は累計EXPだけで解放する。旧条件ベースの呼び出しは記録しない。
   syncExpTitles(motivation.exp,motivation.exp,day);
   return false;
 }
@@ -386,7 +386,7 @@ function awardExp(points,reason,details={},day=dateKey()){
   syncExpTitles(beforeExp,motivation.exp,day);
 }
 function evaluateTitles(day=dateKey(),extra={}){
-  // v1.6.1以降の称号判定はEXPのみ。起床・ページ数・生活回数などの個別条件は使わない。
+  // v1.6.2以降の称号判定はEXPのみ。起床・ページ数・生活回数などの個別条件は使わない。
   syncExpTitles(motivation.exp,motivation.exp,day);
 }
 function dayDoneStats(day,plan){
