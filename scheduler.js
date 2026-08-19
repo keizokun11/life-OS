@@ -9,8 +9,20 @@ export const DEFAULT_SETTINGS = {
   bathMinutes: 30,
   skincareMinutes: 10,
   bathBeforeBedMinutes: 90,
+  morningTraining: {
+    enabled: true,
+    coreLowerMinutes: 20,
+    suburiMinutes: 25,
+    suburiCount: 1000,
+    stretchMinutes: 10,
+    showerMinutes: 5,
+    breakfastEnabled: true,
+    breakfastMinutes: 15,
+    autoAdjustForMorningEvent: true,
+  },
   relaxedMinMinutes: 90,
   relaxedRatio: 0.20,
+  deadlineStrictRelaxedMinMinutes: 30,
   classDayEveningCapMinutes: 60,
   cloudSyncEnabled: true,
   cloudFileName: 'life-os-data.json',
@@ -46,6 +58,10 @@ export function deepDefaults(saved = {}) {
       high: { ...DEFAULT_SETTINGS.energy.high, ...(saved.energy?.high || {}) },
       normal: { ...DEFAULT_SETTINGS.energy.normal, ...(saved.energy?.normal || {}) },
       tired: { ...DEFAULT_SETTINGS.energy.tired, ...(saved.energy?.tired || {}) },
+    },
+    morningTraining: {
+      ...DEFAULT_SETTINGS.morningTraining,
+      ...(saved.morningTraining || {}),
     },
     buffers: {
       ...DEFAULT_SETTINGS.buffers,
@@ -171,7 +187,8 @@ function urgency(task, day) {
   const focus = { main: 1.50, sub: 1.06, maintain: 0.74 }[task.focus] || 1;
   const mode = task.mode === 'grow' ? 1.10 : 1;
   const fixedDateBoost = task.placement === 'date' && task.fixedDate === day ? 2.4 : 1;
-  return (estimatedRemainingMinutes(task) / d) * priority * focus * mode * fixedDateBoost;
+  const strict = task.deadlineStrict ? 3.0 : 1;
+  return (estimatedRemainingMinutes(task) / d) * priority * focus * mode * fixedDateBoost * strict;
 }
 
 function desiredTodayPages(task, day, budgetMinutes, loadMultiplier = 1) {
@@ -179,23 +196,25 @@ function desiredTodayPages(task, day, budgetMinutes, loadMultiplier = 1) {
   if (remainingPages <= 0 || budgetMinutes <= 0) return 0;
   const minutesPerPage = taskMinutesPerPage(task);
   const baselinePages = remainingPages / daysUntilTask(task, day);
-  const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier;
+  const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier * (task.deadlineStrict ? 1.35 : 1);
   const minPages = Math.max(1, Number(task.minPages || 5));
   const maxPages = Math.max(minPages, Number(task.maxPages || 30));
   const byBudget = Math.floor(budgetMinutes / minutesPerPage);
   if (byBudget <= 0) return 0;
   const target = Math.max(1, Math.ceil(baselinePages * mult));
-  return Math.min(remainingPages, byBudget, maxPages, Math.max(Math.min(minPages, byBudget), target));
+  const dailyCap = task.deadlineStrict ? remainingPages : maxPages;
+  return Math.min(remainingPages, byBudget, dailyCap, Math.max(Math.min(minPages, byBudget), target));
 }
 
 function desiredTodayMinutes(task, day, budget, loadMultiplier = 1) {
   if (Number(task.remainingMinutes || 0) <= 0 || budget <= 0) return 0;
   const baseline = Number(task.remainingMinutes) / daysUntilTask(task, day);
-  const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier;
+  const mult = ({ main: 1.25, sub: 1, maintain: 0.70 }[task.focus] || 1) * loadMultiplier * (task.deadlineStrict ? 1.35 : 1);
   const min = Number(task.minBlock || 20);
   const max = Number(task.maxBlock || 120);
   const target = Math.ceil((baseline * mult) / 5) * 5;
-  return Math.min(Number(task.remainingMinutes), budget, max, Math.max(min, target));
+  const dailyCap = task.deadlineStrict ? Number(task.remainingMinutes) : max;
+  return Math.min(Number(task.remainingMinutes), budget, dailyCap, Math.max(min, target));
 }
 
 function isClassDay(events, settings) {
@@ -327,6 +346,84 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   fixedCore.push(...fixedTasks);
   fixedTasks.forEach((x) => busyForWork.push({ start: x.start, end: x.end }));
 
+  // Morning training starts from the actual wake time. If a morning event/buffer is too close,
+  // Life OS shortens the routine automatically instead of letting training make the user late.
+  const morningRoutine = [];
+  let morningAdjustment = null;
+  if (settings.morningTraining?.enabled !== false) {
+    const mt = settings.morningTraining || {};
+    const suburiCount = Math.max(0, Math.round(Number(mt.suburiCount ?? 1000)));
+    const baseSteps = [
+      { key: 'core', title: '体幹＆下半身トレ', minutes: Number(mt.coreLowerMinutes || 20) },
+      { key: 'suburi', title: `素振り${suburiCount}本`, minutes: Number(mt.suburiMinutes || 25), count: suburiCount },
+      { key: 'stretch', title: 'クールダウンストレッチ', minutes: Number(mt.stretchMinutes || 10) },
+      { key: 'shower', title: 'シャワー', minutes: Number(mt.showerMinutes || 5) },
+      ...(mt.breakfastEnabled === false ? [] : [{ key: 'breakfast', title: '朝食', minutes: Number(mt.breakfastMinutes || 15) }]),
+    ].filter((s) => s.minutes > 0);
+    const requestedMinutes = baseSteps.reduce((sum, s) => sum + s.minutes, 0);
+    let availableBeforeMorningEvent = Infinity;
+    if (mt.autoAdjustForMorningEvent !== false) {
+      for (const b of busyForWork) {
+        if (b.end <= wake) continue;
+        if (b.start <= wake) { availableBeforeMorningEvent = 0; break; }
+        availableBeforeMorningEvent = Math.min(availableBeforeMorningEvent, b.start - wake);
+      }
+    }
+    const targetMinutes = Number.isFinite(availableBeforeMorningEvent)
+      ? Math.max(0, Math.min(requestedMinutes, Math.floor(availableBeforeMorningEvent)))
+      : requestedMinutes;
+
+    let steps = baseSteps.map((s) => ({ ...s }));
+    if (targetMinutes < requestedMinutes) {
+      const minutesByKey = Object.fromEntries(baseSteps.map((s) => [s.key, 0]));
+      let rest = targetMinutes;
+      const find = (key) => baseSteps.find((s) => s.key === key);
+      const reserve = (key, min) => {
+        const s = find(key); if (!s || rest <= 0) return;
+        const need = Math.min(s.minutes, min, rest);
+        if (need > 0) { minutesByKey[key] += need; rest -= need; }
+      };
+      // Keep readiness first when time is tight: shower and breakfast are protected, training is shortened.
+      reserve('shower', 5);
+      reserve('breakfast', 10);
+      reserve('stretch', 3);
+      for (const key of ['core', 'suburi', 'stretch', 'breakfast', 'shower']) {
+        const s = find(key); if (!s || rest <= 0) continue;
+        const cap = Math.max(0, s.minutes - minutesByKey[key]);
+        const add = Math.min(cap, rest);
+        minutesByKey[key] += add; rest -= add;
+      }
+      steps = baseSteps.map((s) => {
+        const mins = Math.round(minutesByKey[s.key] || 0);
+        let title = s.title;
+        if (s.key === 'suburi' && s.count && s.minutes > 0 && mins > 0 && mins < s.minutes) {
+          const adjustedCount = Math.max(1, Math.round(s.count * mins / s.minutes));
+          title = `素振り${adjustedCount}本（短縮）`;
+        } else if (mins > 0 && mins < s.minutes) {
+          title = `${s.title}（短縮）`;
+        }
+        return { ...s, title, minutes: mins };
+      }).filter((s) => s.minutes > 0);
+      morningAdjustment = {
+        mode: targetMinutes > 0 ? 'shortened' : 'skipped',
+        requestedMinutes,
+        scheduledMinutes: steps.reduce((sum, s) => sum + s.minutes, 0),
+        availableMinutes: Math.max(0, Math.floor(availableBeforeMorningEvent)),
+      };
+    } else {
+      morningAdjustment = { mode: 'full', requestedMinutes, scheduledMinutes: requestedMinutes, availableMinutes: null };
+    }
+
+    let cursor = wake;
+    for (const step of steps) {
+      const item = { type: 'life', title: step.title, start: cursor, end: cursor + step.minutes, movable: false, routineGroup: 'morningTraining', routineKey: step.key };
+      morningRoutine.push(item);
+      fixedCore.push(item);
+      busyForWork.push({ start: item.start, end: item.end });
+      cursor = item.end;
+    }
+  }
+
   const bathEnd = bed - Number(settings.bathBeforeBedMinutes || 90);
   const bathStart = bathEnd - Number(settings.bathMinutes || 30);
   const skincareEnd = bathEnd + Number(settings.skincareMinutes || 10);
@@ -335,7 +432,9 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
 
   let free = freeIntervals(wake, bed, mergeIntervals(busyForWork));
   const rawFree = free.reduce((s, b) => s + b.end - b.start, 0);
-  const relaxedTarget = Math.max(0, Math.max(Number(settings.relaxedMinMinutes || 90), rawFree * Number(settings.relaxedRatio || 0.2)) + Number(energy.relaxedExtra || 0));
+  let relaxedTarget = Math.max(0, Math.max(Number(settings.relaxedMinMinutes || 90), rawFree * Number(settings.relaxedRatio || 0.2)) + Number(energy.relaxedExtra || 0));
+  const strictPendingForDay = (tasks || []).some((t) => t.deadlineStrict && t.status !== 'paused' && !taskExpiredBeforeDay(t, day) && placementAllowsDay(t, day) && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0));
+  if (strictPendingForDay) relaxedTarget = Math.min(relaxedTarget, Math.max(0, Number(settings.deadlineStrictRelaxedMinMinutes ?? 30)));
   let budget = Math.max(0, (rawFree - relaxedTarget) * Number(energy.budgetMultiplier || 1));
 
   if (classDay) {
@@ -360,7 +459,7 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   const fixedTaskIds = new Set(fixedTasks.map((x) => x.taskId));
   const active = (tasks || [])
     .filter((t) => t.status !== 'paused' && !fixedTaskIds.has(t.id) && !taskExpiredBeforeDay(t, day) && placementAllowsDay(t, day) && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0) )
-    .sort((a, b) => urgency(b, day) - urgency(a, day));
+    .sort((a, b) => (Number(Boolean(b.deadlineStrict)) - Number(Boolean(a.deadlineStrict))) || urgency(b, day) - urgency(a, day));
 
   const planned = [];
   let remainingBudget = budget;
@@ -392,7 +491,7 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   const relaxedMinutes = Math.max(relaxedTarget, rawFree - planned.reduce((s, x) => s + x.end - x.start, 0));
   const timeline = [...fixedCore.filter((x) => x.type !== 'task'), ...allTaskItems].sort((a, b) => a.start - b.start);
 
-  return { classDay, energyState, allDayPending, eventBufferInfo, timeline, rawFreeMinutes: rawFree, scheduledTaskMinutes, scheduledTaskPages, relaxedMinutes };
+  return { classDay, energyState, allDayPending, eventBufferInfo, timeline, morningRoutine, morningAdjustment, rawFreeMinutes: rawFree, scheduledTaskMinutes, scheduledTaskPages, relaxedMinutes };
 }
 
 export function forecastDeadlineRisks({ fromDay, tasks, events, overrides, settings, dayModes = {}, dayStates = {}, dailySleepPlans = {}, wakeRecords = {}, maxDays }) {
@@ -456,6 +555,7 @@ export function forecastDeadlineRisks({ fromDay, tasks, events, overrides, setti
       if (slack <= 1) { level = 'yellow'; text = '期限ぎりぎりで完了見込み'; action = '少し前倒しすると安全'; }
       else { level = 'green'; text = `${Math.max(0, slack)}日程度の余裕`; }
     }
+    if (original.deadlineStrict && level !== 'green') action = `期限死守ON：${action}`;
     return { taskId: original.id, title: original.title, level, text, action, finishDay, shortage, plannedAmount: plannedThroughDeadline[original.id] || 0, unit: isPages ? 'pages' : 'minutes' };
   });
 }
