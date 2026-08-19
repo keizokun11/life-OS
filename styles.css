@@ -188,7 +188,7 @@ input:focus,select:focus{outline:3px solid rgba(37,99,235,.16);border-color:#256
   color:#9a3412;
 }
 
-/* v1.6.5: 文字コントラスト改善。背景色に合わせて可読性を優先する。 */
+/* v1.6.6: Boss HP表示補正。背景色に合わせて可読性を優先する。 */
 :root{
   --text-on-light:#0f172a;
   --text-on-muted:#334155;

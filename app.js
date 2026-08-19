@@ -1,6 +1,6 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.5';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.6';
 
-const APP_VERSION = '1.6.5';
+const APP_VERSION = '1.6.6';
 const DATA_SCHEMA_VERSION = 18;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
@@ -103,7 +103,7 @@ function initializeStorage() {
     if (Number(meta.schemaVersion||0) < 11) { const st=deepDefaults(load('settings', DEFAULT_SETTINGS)); if(!Array.isArray(st.subjects)||!st.subjects.length) st.subjects=[...DEFAULT_SETTINGS.subjects]; save('settings',st); }
     if (Number(meta.schemaVersion||0) < 12) { const st=deepDefaults(load('settings', DEFAULT_SETTINGS)); st.morningTraining={...DEFAULT_SETTINGS.morningTraining,...(st.morningTraining||{})}; save('settings',st); }
     if (Number(meta.schemaVersion||0) < 13) { if(!localStorage.getItem(K('morningTrainingOverrides'))) save('morningTrainingOverrides', {}); if(!localStorage.getItem(K('quickEvents'))) save('quickEvents', []); }
-    // v1.6.5: 未完了へ戻した残タスクを現在時刻以降に再配置する表示・計画ロジック。データ移行なし。
+    // v1.6.6: Boss HPは残量がある限り最低1%として表示し、1頁残りなのに0%になる丸め誤差を防ぐ。データ移行なし。
     save('meta', { ...meta, appVersion:APP_VERSION, schemaVersion:DATA_SCHEMA_VERSION, upgradedAt:new Date().toISOString() });
   }
 }
@@ -462,7 +462,7 @@ function motivationPanel(day=dateKey(),plan=currentPlan(day)){
 function bossCardsHtml(){
   const active=tasks.filter(t=>t.status!=='paused' && (Number(t.remainingPages||0)>0||Number(t.remainingMinutes||0)>0)).sort((a,b)=>String(a.deadline).localeCompare(String(b.deadline))).slice(0,6);
   if(!active.length) return '';
-  const cards=active.map(t=>{const isPage=Number.isFinite(Number(t.remainingPages)); const initial=Math.max(1,Number(isPage?(t.initialPages||t.remainingPages):(t.initialMinutes||t.remainingMinutes)||1)); const remaining=Math.max(0,Number(isPage?t.remainingPages:t.remainingMinutes||0)); const hp=Math.max(0,Math.min(100,Math.round(remaining/initial*100))); const dealt=100-hp; return `<div class="boss-card"><div class="row between"><div><strong>${esc(t.title)}</strong><small>期限 ${esc(deadlineLabel(t))} ・ Boss HP ${hp}%</small></div><span class="risk-badge ${hp<25?'green':hp<55?'yellow':hp<80?'orange':'red'}">${isPage?`${Math.ceil(remaining)}頁`:`${minutesLabel(remaining)}`}</span></div><div class="boss-bar"><span style="width:${dealt}%"></span></div></div>`;}).join('');
+  const cards=active.map(t=>{const isPage=Number.isFinite(Number(t.remainingPages)); const initial=Math.max(1,Number(isPage?(t.initialPages||t.remainingPages):(t.initialMinutes||t.remainingMinutes)||1)); const remaining=Math.max(0,Number(isPage?t.remainingPages:t.remainingMinutes||0)); const rawHp=remaining/initial*100; const hp=remaining>0?Math.max(1,Math.min(100,Math.round(rawHp))):0; const progress=100-hp; return `<div class="boss-card"><div class="row between"><div><strong>${esc(t.title)}</strong><small>期限 ${esc(deadlineLabel(t))} ・ Boss HP ${hp}%</small></div><span class="risk-badge ${hp===0?'green':hp<25?'green':hp<55?'yellow':hp<80?'orange':'red'}">${isPage?`${Math.ceil(remaining)}頁`:`${minutesLabel(remaining)}`}</span></div><div class="boss-bar" aria-label="Boss HP ${hp}%"><span style="width:${progress}%"></span></div></div>`;}).join('');
   return `<section class="card"><p class="eyebrow">BOSS MODE</p><h2>締切ボス</h2><p class="muted">進めた分だけHPが減る。大きい課題を“倒す対象”として見える化します。</p><div class="boss-list">${cards}</div></section>`;
 }
 function saveTodaySnapshot(plan, manualMode) {
