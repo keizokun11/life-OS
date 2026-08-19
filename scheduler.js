@@ -455,7 +455,15 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
     budget = Math.min(budget, free.reduce((s, b) => s + b.end - b.start, 0));
   }
 
-  const workBlocks = free.map((b) => ({ ...b }));
+  let workBlocks = free.map((b) => ({ ...b }));
+  // App側から現在時刻が渡された場合、可動タスクはその時刻以降の空き時間だけに再配置する。
+  // 固定予定・授業・朝トレ・生活固定タスクはそのまま保持する。
+  const rescheduleFrom = Number(settings.rescheduleMovableFromMinute);
+  if (Number.isFinite(rescheduleFrom) && rescheduleFrom > wake) {
+    workBlocks = workBlocks
+      .map((b) => ({ start: Math.max(b.start, rescheduleFrom), end: b.end }))
+      .filter((b) => b.end - b.start >= 10);
+  }
   const fixedTaskIds = new Set(fixedTasks.map((x) => x.taskId));
   const active = (tasks || [])
     .filter((t) => t.status !== 'paused' && !fixedTaskIds.has(t.id) && !taskExpiredBeforeDay(t, day) && placementAllowsDay(t, day) && (isPageTask(t) ? Number(t.remainingPages) > 0 : Number(t.remainingMinutes) > 0) )

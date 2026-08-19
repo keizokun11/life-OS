@@ -173,3 +173,167 @@ input:focus,select:focus{outline:3px solid rgba(37,99,235,.16);border-color:#256
 .title-list.title-road{scrollbar-color:#cbd5e1 transparent}.title-chip{background:#ffffff;border:1px solid #dbe4ef;color:#1f2937}.title-chip small{color:#2563eb}.title-chip.locked{opacity:.45}.title-chip.current{border-color:#f59e0b;background:linear-gradient(135deg,#fff7ed,#eff6ff);box-shadow:0 8px 22px rgba(245,158,11,.13)}
 .victory-entry{border-left:4px solid #f59e0b;background:#fffdf5}.operation-entry{background:#f8fafc}.plan-editor-card{background:#ffffff}.plan-editor-head{background:#fffaf2;border-bottom-color:#e5e7eb}.form-section-title{color:#1d4ed8}.weekday-btn,.segmented.wide .plan-choice,.segmented button{background:#ffffff;color:#334155;border:1px solid #cbd5e1}.weekday-btn.selected,.segmented.wide .plan-choice.selected,.segmented button.selected{background:linear-gradient(135deg,#2563eb,#0ea5e9);color:#ffffff;border-color:#2563eb}.app-footer{color:#64748b}
 @media(max-width:640px){body{background:linear-gradient(180deg,#fff7ea 0%,#f0fbff 55%,#f8fafc 100%)}.topbar h1{font-size:32px}.card,.hero-card,.focus-screen{border-radius:22px}.focus-screen h2{font-size:30px}.timeline-item.now-row.current{box-shadow:0 10px 24px rgba(37,99,235,.18)}}
+
+
+/* v1.6.3: 完了取り消し後に過去のタスクを「終了」ではなく「未完了」と表示 */
+.timeline-item.now-row.missed{
+  opacity:1;
+  filter:none;
+  border:1px solid #f59e0b;
+  background:#fff7ed;
+  box-shadow:0 6px 18px rgba(245,158,11,.12);
+}
+.now-status.missed,.legend.missed{
+  background:#ffedd5;
+  color:#9a3412;
+}
+
+/* v1.6.5: 文字コントラスト改善。背景色に合わせて可読性を優先する。 */
+:root{
+  --text-on-light:#0f172a;
+  --text-on-muted:#334155;
+  --text-on-dark:#ffffff;
+  --soft-panel:#ffffff;
+  --soft-panel-border:#dbe4ef;
+}
+
+body{color:var(--text-on-light)}
+.card,
+.plan-editor-card,
+.timeline-item,
+.task-row,
+.idea-row,
+.history-day,
+.operation-entry,
+.victory-entry,
+.calendar-source-row,
+.boss-card,
+.challenge-card,
+.quick-event-row,
+.period-row,
+.course-row,
+.event-buffer-row,
+.buffer-card{
+  color:var(--text-on-light)!important;
+}
+.card h1,.card h2,.card h3,
+.plan-editor-card h1,.plan-editor-card h2,.plan-editor-card h3,
+.timeline-body strong,
+.task-row strong,
+.history-day strong,
+.boss-card strong,
+.challenge-card strong{
+  color:var(--text-on-light)!important;
+}
+
+.hero-card,
+.focus-screen,
+.command-card,
+.motivation-summary{
+  color:var(--text-on-light)!important;
+}
+.hero-card h2,
+.focus-screen h2,
+.command-card h2,
+.motivation-summary h2,
+.motivation-card h2{
+  color:var(--text-on-light)!important;
+  background:none!important;
+  -webkit-background-clip:initial!important;
+  background-clip:initial!important;
+}
+.hero-card .eyebrow,
+.focus-screen .eyebrow,
+.command-card .eyebrow,
+.motivation-summary .eyebrow{
+  color:#0f766e!important;
+}
+
+/* 起床予定・現在時刻カード：暗い背景に暗い文字が出る問題を根本修正 */
+.wake-times>div{
+  background:var(--soft-panel)!important;
+  border:1px solid var(--soft-panel-border)!important;
+  box-shadow:0 8px 18px rgba(31,41,55,.07)!important;
+  color:var(--text-on-light)!important;
+}
+.wake-times span{
+  color:#475569!important;
+  font-weight:900!important;
+}
+.wake-times strong{
+  color:#0f172a!important;
+  font-weight:950!important;
+  text-shadow:none!important;
+}
+.wake-note{color:#475569!important}
+
+/* 暗い背景を使う部品は白文字に固定 */
+.now-clock,
+.now-clock strong,
+.now-clock span{
+  color:var(--text-on-dark)!important;
+}
+.now-clock span{color:#cbd5e1!important}
+.primary,
+.tabs button.active,
+.now-status.current,
+.heat-badge{
+  color:#ffffff!important;
+}
+.tabs button.active,
+.primary{
+  text-shadow:0 1px 1px rgba(0,0,0,.18);
+}
+
+/* 白・淡色背景の上では濃色文字に固定 */
+.secondary,.ghost,.done-btn,.icon-btn,.undo-btn,.file-button,
+input,select,textarea,
+.mode-select,.weekday-btn,.segmented button,.plan-choice{
+  color:var(--text-on-light)!important;
+}
+.secondary,.ghost,.done-btn,.icon-btn,.undo-btn,.file-button{
+  background:#ffffff!important;
+}
+.weekday-btn.selected,.segmented button.selected,.segmented.wide .plan-choice.selected{
+  color:#ffffff!important;
+}
+
+/* タイムラインの状態表示 */
+.timeline-item.now-row.current{
+  color:#0f172a!important;
+}
+.timeline-item.now-row.current .timeline-body strong,
+.timeline-item.now-row.current .time,
+.timeline-item.now-row.current .time span{
+  color:#0f172a!important;
+}
+.timeline-item.now-row.past .timeline-body strong,
+.timeline-item.now-row.past .time,
+.timeline-item.now-row.past .time span{
+  color:#64748b!important;
+}
+.timeline-item.now-row.missed .timeline-body strong,
+.timeline-item.now-row.missed .time,
+.timeline-item.now-row.missed .time span{
+  color:#9a3412!important;
+}
+.now-status.future{color:#334155!important}
+.now-status.past{color:#64748b!important}
+.now-status.missed{color:#9a3412!important}
+
+/* 重要な数字は常に見やすく */
+.metrics strong,
+.review-metrics strong,
+.history-metrics strong,
+.focus-timer,
+.focus-big,
+.exp-title-row strong{
+  color:#0f172a!important;
+  text-shadow:none!important;
+}
+.focus-timer,.focus-big{color:#ea580c!important}
+
+@media(max-width:640px){
+  .wake-times{grid-template-columns:1fr 1fr}
+  .wake-times strong{font-size:24px!important}
+}

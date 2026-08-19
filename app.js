@@ -1,7 +1,7 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.2';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage } from './scheduler.js?v=1.6.5';
 
-const APP_VERSION = '1.6.2';
-const DATA_SCHEMA_VERSION = 17;
+const APP_VERSION = '1.6.5';
+const DATA_SCHEMA_VERSION = 18;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const K = (name) => `lifeos:${name}`;
@@ -103,6 +103,7 @@ function initializeStorage() {
     if (Number(meta.schemaVersion||0) < 11) { const st=deepDefaults(load('settings', DEFAULT_SETTINGS)); if(!Array.isArray(st.subjects)||!st.subjects.length) st.subjects=[...DEFAULT_SETTINGS.subjects]; save('settings',st); }
     if (Number(meta.schemaVersion||0) < 12) { const st=deepDefaults(load('settings', DEFAULT_SETTINGS)); st.morningTraining={...DEFAULT_SETTINGS.morningTraining,...(st.morningTraining||{})}; save('settings',st); }
     if (Number(meta.schemaVersion||0) < 13) { if(!localStorage.getItem(K('morningTrainingOverrides'))) save('morningTrainingOverrides', {}); if(!localStorage.getItem(K('quickEvents'))) save('quickEvents', []); }
+    // v1.6.5: 未完了へ戻した残タスクを現在時刻以降に再配置する表示・計画ロジック。データ移行なし。
     save('meta', { ...meta, appVersion:APP_VERSION, schemaVersion:DATA_SCHEMA_VERSION, upgradedAt:new Date().toISOString() });
   }
 }
@@ -224,7 +225,16 @@ function wakeGateMarkup(tab='today'){
 function plannedSleepMinutes(day){
   const s=sleepPlanForDay(day); let bed=toMinutes(s.bedTime), todayWake=toMinutes(s.wakeTime); if(bed<=todayWake)bed+=1440; let nextWake=1440+toMinutes(s.nextWakeTime); if(nextWake<=bed)nextWake+=1440; return Math.max(0,nextWake-bed);
 }
-function currentPlan(day=selectedDay){ return generateDayPlan({day,tasks,events:planningEventsForDay(day),overrides,settings:effectiveSettingsForDay(day),classDayOverride:dayModes[day]||'auto',energyState:dayStates[day]||'normal'}); }
+function currentPlan(day=selectedDay){
+  const st = effectiveSettingsForDay(day);
+  // 今日の計画は、現在時刻より前に残タスクを置き直さない。
+  // これにより、記録から未完了に戻したタスクは過去の枠へ戻らず、この先の空き時間へ再配置される。
+  if(day === dateKey() && wakeRecords[day]?.wakeTime){
+    const now = new Date();
+    st.rescheduleMovableFromMinute = now.getHours()*60 + now.getMinutes();
+  }
+  return generateDayPlan({day,tasks,events:planningEventsForDay(day),overrides,settings:st,classDayOverride:dayModes[day]||'auto',energyState:dayStates[day]||'normal'});
+}
 function morningTrainingTotal(){ const m=settings.morningTraining||{}; const total=['coreLowerMinutes','suburiMinutes','stretchMinutes','showerMinutes'].reduce((sum,k)=>sum+Math.max(0,Number(m[k]||0)),0); return total + (m.breakfastEnabled===false?0:Math.max(0,Number(m.breakfastMinutes||0))); }
 function completionKeyForItem(item){ return `${item.type}:${item.taskId||item.title}:${Math.round(item.start)}:${Math.round(item.end)}`; }
 function completionLogForItem(item, day=selectedDay){
@@ -261,7 +271,9 @@ function nowTimelineMarkup(plan, day=dateKey(), nowMin=null){
     const completed = isItemCompleted(x, day);
     let status = 'future';
     let label = '予定';
-    if (completed || (isToday && x.end <= currentMin)) { status = 'past'; label = completed ? '完了' : '終了'; }
+    const actionable = x.type==='task' || x.type==='life';
+    if (completed) { status = 'past'; label = '完了'; }
+    else if (isToday && x.end <= currentMin) { status = actionable ? 'missed' : 'past'; label = actionable ? '未完了' : '終了'; }
     if (!completed && isToday && x.start <= currentMin && currentMin < x.end) { status = 'current'; label = '今ここ'; }
     const amount = x.type==='task' && x.pages ? `${x.pages}ページ ・ ${minutesLabel(mins)}目安` : minutesLabel(mins);
     const fixed = x.movable===false ? ' ・ 固定' : '';
@@ -270,7 +282,7 @@ function nowTimelineMarkup(plan, day=dateKey(), nowMin=null){
   const current = visible.find(x => !isItemCompleted(x, day) && isToday && x.start <= currentMin && currentMin < x.end);
   const next = visible.find(x => !isItemCompleted(x, day) && (!isToday || x.end > currentMin));
   const focusText = current ? `現在：${current.title}` : next ? `次：${next.title}` : '今日の予定は完了または未登録';
-  return `<section class="card now-schedule-card"><div class="row between now-clock-row"><div><p class="eyebrow">TODAY TIMELINE</p><h3>今日の予定一覧</h3></div><div class="now-clock"><span>現在時刻</span><strong id="nowClockText">${hhmm()}</strong></div></div><p class="muted now-focus-line">${esc(focusText)}</p><div class="timeline now-timeline">${rows || '<p class="muted">予定・課題がまだありません。</p>'}</div><p class="muted timeline-legend"><span class="legend past">終了/完了</span><span class="legend current">今の予定</span><span class="legend future">今後</span></p></section>`;
+  return `<section class="card now-schedule-card"><div class="row between now-clock-row"><div><p class="eyebrow">TODAY TIMELINE</p><h3>今日の予定一覧</h3></div><div class="now-clock"><span>現在時刻</span><strong id="nowClockText">${hhmm()}</strong></div></div><p class="muted now-focus-line">${esc(focusText)}</p><div class="timeline now-timeline">${rows || '<p class="muted">予定・課題がまだありません。</p>'}</div><p class="muted timeline-legend"><span class="legend past">終了/完了</span><span class="legend missed">未完了</span><span class="legend current">今の予定</span><span class="legend future">今後</span></p></section>`;
 }
 function currentRisks(){ return forecastDeadlineRisks({fromDay:dateKey(),tasks,events:planningEventsForForecast(dateKey(),settings.forecastDays),overrides,settings,dayModes,dayStates,dailySleepPlans,wakeRecords,maxDays:settings.forecastDays}); }
 
@@ -582,7 +594,7 @@ function undoCompletion(logId){
   if(log.taskId) recomputeTaskSpeed(log.taskId);
   persist();
   renderAll();
-  notice(`未完了に戻しました。EXP -${Math.round(expBack)}。`);
+  notice(`未完了に戻し、この先の予定へ入れ直しました。EXP -${Math.round(expBack)}。`);
 }
 function recomputeTaskSpeed(taskId){
   const t=tasks.find(x=>x.id===taskId); if(!t) return;
