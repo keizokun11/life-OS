@@ -1,7 +1,7 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage, dayMinuteFromClock, dayMinuteFromDate } from './scheduler.js?v=1.6.8';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage, dayMinuteFromClock, dayMinuteFromDate } from './scheduler.js?v=1.6.9';
 
-const APP_VERSION = '1.6.8';
-const DATA_SCHEMA_VERSION = 20;
+const APP_VERSION = '1.6.9';
+const DATA_SCHEMA_VERSION = 21;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const K = (name) => `lifeos:${name}`;
@@ -137,6 +137,7 @@ function initializeStorage() {
     if (Number(meta.schemaVersion||0) < 12) { const st=deepDefaults(load('settings', DEFAULT_SETTINGS)); st.morningTraining={...DEFAULT_SETTINGS.morningTraining,...(st.morningTraining||{})}; save('settings',st); }
     if (Number(meta.schemaVersion||0) < 13) { if(!localStorage.getItem(K('morningTrainingOverrides'))) save('morningTrainingOverrides', {}); if(!localStorage.getItem(K('quickEvents'))) save('quickEvents', []); }
     // v1.6.6: Boss HPは残量がある限り最低1%として表示し、1頁残りなのに0%になる丸め誤差を防ぐ。データ移行なし。
+    // v1.6.9: AI入力アシスト。既存データ移行なし。
     save('meta', { ...meta, appVersion:APP_VERSION, schemaVersion:DATA_SCHEMA_VERSION, upgradedAt:new Date().toISOString() });
   }
 }
@@ -498,6 +499,129 @@ function bossCardsHtml(){
   const cards=active.map(t=>{const isPage=Number.isFinite(Number(t.remainingPages)); const initial=Math.max(1,Number(isPage?(t.initialPages||t.remainingPages):(t.initialMinutes||t.remainingMinutes)||1)); const remaining=Math.max(0,Number(isPage?t.remainingPages:t.remainingMinutes||0)); const rawHp=remaining/initial*100; const hp=remaining>0?Math.max(1,Math.min(100,Math.round(rawHp))):0; const progress=100-hp; return `<div class="boss-card"><div class="row between"><div><strong>${esc(t.title)}</strong><small>期限 ${esc(deadlineLabel(t))} ・ Boss HP ${hp}%</small></div><span class="risk-badge ${hp===0?'green':hp<25?'green':hp<55?'yellow':hp<80?'orange':'red'}">${isPage?`${Math.ceil(remaining)}頁`:`${minutesLabel(remaining)}`}</span></div><div class="boss-bar" aria-label="Boss HP ${hp}%"><span style="width:${progress}%"></span></div></div>`;}).join('');
   return `<section class="card"><p class="eyebrow">BOSS MODE</p><h2>締切ボス</h2><p class="muted">進めた分だけHPが減る。大きい課題を“倒す対象”として見える化します。</p><div class="boss-list">${cards}</div></section>`;
 }
+
+function normalizeLooseDateText(text, baseDay=selectedDay||dateKey()){
+  const raw=String(text||'');
+  const base=new Date(`${baseDay}T12:00:00`);
+  if(/明後日/.test(raw)) return addDays(baseDay,2);
+  if(/明日|あした|翌日/.test(raw)) return addDays(baseDay,1);
+  if(/今日|本日/.test(raw)) return baseDay;
+  const ymd=raw.match(/(20\d{2})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+  if(ymd){ const y=ymd[1],m=String(ymd[2]).padStart(2,'0'),d=String(ymd[3]).padStart(2,'0'); return `${y}-${m}-${d}`; }
+  const md=raw.match(/(\d{1,2})[\/月](\d{1,2})日?/);
+  if(md){ const y=base.getFullYear(); return `${y}-${String(md[1]).padStart(2,'0')}-${String(md[2]).padStart(2,'0')}`; }
+  const week=['日','月','火','水','木','金','土'];
+  const w=raw.match(/(来週)?([月火水木金土日])曜?/);
+  if(w){ const target=week.indexOf(w[2]); const cur=base.getDay(); let diff=(target-cur+7)%7; if(diff===0)diff=7; if(w[1]) diff+=7; return addDays(baseDay,diff); }
+  return baseDay;
+}
+function parseLooseTimeToken(token, context=''){
+  let t=String(token||'').trim(); if(!t)return '';
+  const colon=t.match(/(\d{1,2})[:：](\d{2})/);
+  let h=null,m=0;
+  if(colon){ h=Number(colon[1]); m=Number(colon[2]); }
+  else { const jp=t.match(/(\d{1,2})\s*時\s*(半|\d{1,2}\s*分?)?/); if(jp){ h=Number(jp[1]); m=jp[2]?.includes('半')?30:Number(String(jp[2]||'0').replace(/\D/g,'')||0); } }
+  if(h===null||!Number.isFinite(h)||!Number.isFinite(m))return '';
+  if(/午後|夕方|夜/.test(context) && h>=1 && h<=11) h+=12;
+  if(/朝|午前/.test(context) && h===12) h=0;
+  h=((h%24)+24)%24; m=Math.max(0,Math.min(59,m));
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+}
+function looseTimes(text){
+  const raw=String(text||''); const out=[]; const re=/(午前|午後|朝|夜|夕方)?\s*(\d{1,2}[:：]\d{2}|\d{1,2}\s*時\s*(?:半|\d{1,2}\s*分?)?)/g; let m;
+  while((m=re.exec(raw))){ const v=parseLooseTimeToken(m[0],m[1]||raw); if(v)out.push(v); }
+  return [...new Set(out)];
+}
+function looseDurationMinutes(text){
+  const raw=String(text||'');
+  const hm=raw.match(/(\d+(?:\.\d+)?)\s*時間\s*(\d+)?\s*分?/); if(hm) return Math.round(Number(hm[1])*60+Number(hm[2]||0));
+  const min=raw.match(/(\d+)\s*分/); if(min) return Number(min[1]);
+  const h=raw.match(/(\d+(?:\.\d+)?)\s*(?:h|ｈ)/i); if(h) return Math.round(Number(h[1])*60);
+  return 0;
+}
+function inferSubjectFromText(text){
+  const raw=String(text||'').toLowerCase();
+  if(/ielts|英語|単語|reading|listening|speaking|writing/.test(raw)) return '英語';
+  if(/ドイツ|独検|german/.test(raw)) return 'ドイツ語';
+  if(/世界遺産|検定|資格|itパスポート|基本情報/.test(raw)) return '資格';
+  if(/授業|講義|レポート|課題/.test(raw)) return '授業';
+  if(/風呂|肌|掃除|洗濯|生活/.test(raw)) return '生活';
+  return currentSubjects()[0] || 'その他';
+}
+function cleanSmartTitle(text){
+  let t=String(text||'').trim();
+  t=t.replace(/(今日|本日|明日|あした|明後日|翌日|来週?[月火水木金土日]曜?)/g,'');
+  t=t.replace(/(20\d{2}[\/\-年]\d{1,2}[\/\-月]\d{1,2}日?|\d{1,2}[\/月]\d{1,2}日?)/g,'');
+  t=t.replace(/(午前|午後|朝|夜|夕方)?\s*\d{1,2}[:：]\d{2}/g,'');
+  t=t.replace(/(午前|午後|朝|夜|夕方)?\s*\d{1,2}\s*時\s*(半|\d{1,2}\s*分?)?/g,'');
+  t=t.replace(/(まで|締切|期限|から|〜|~|－|-|やる|する|入れる|追加|お願い|予定|用事)/g,' ');
+  t=t.replace(/\s+/g,' ').trim();
+  return t || 'AI入力タスク';
+}
+function parseSmartInputLocal(text, baseDay=selectedDay||dateKey()){
+  const raw=String(text||'').trim(); if(!raw)return [];
+  const day=normalizeLooseDateText(raw,baseDay); const times=looseTimes(raw); const duration=looseDurationMinutes(raw); const actions=[];
+  const lower=raw.toLowerCase();
+  if(/(朝トレ|自主練|素振り).*(なし|オフ|off|やめる|休み)/i.test(raw)) actions.push({type:'morningToggle',day,enabled:false,summary:`${day}の自主練をOFF`});
+  else if(/(朝トレ|自主練|素振り).*(あり|オン|on|やる|入れる)/i.test(raw)) actions.push({type:'morningToggle',day,enabled:true,summary:`${day}の自主練をON`});
+  if(/(寝る|就寝|就寝予定|寝たい)/.test(raw) && times[0]) actions.push({type:'sleep',day:baseDay,bedTime:times.at(-1),summary:`${baseDay}の就寝予定を${times.at(-1)}に設定`});
+  if(/(起床|起きる|起きたい|起床予定)/.test(raw) && times[0]) actions.push({type:'sleep',day:baseDay,nextWakeTime:times[0],summary:`翌日の起床予定を${times[0]}に設定`});
+  const taskLike=/(ページ|頁|問|問題|字|レポート|課題|単語|テキスト|問題集|勉強|学習|読む|解く)/.test(raw);
+  const eventLike=/(用事|予定|洗濯|買い物|面談|病院|歯医者|友達|食事|ご飯|バイト|部活|稽古|移動|電車|授業|会議|ミーティング)/.test(raw);
+  const hasRange=/[-〜~から]/.test(raw) && times.length>=2;
+  if((eventLike||hasRange||/今から/.test(raw)) && times[0] && (times[1]||duration)){
+    const title=cleanSmartTitle(raw).replace(/\d+\s*(分|時間|ページ|頁).*/,'').trim() || '急な用事';
+    actions.push({type:'quickEvent',day,title,startTime:times[0],endTime:times[1]||'',durationMinutes:duration||30,inputMode:times[1]?'range':'duration',bufferLevel:/部活|稽古|バイト|面談|病院/.test(raw)?'medium':'none',summary:`${day} ${times[0]}${times[1]?`〜${times[1]}`:`から${duration||30}分`}「${title}」を追加`});
+  }
+  if(taskLike){
+    const range=raw.match(/(\d+)\s*[〜~\-－]\s*(\d+)\s*(ページ|頁|問|問題)?/);
+    const pagesMatch=raw.match(/(?:あと|残り)?\s*(\d+)\s*(ページ|頁|単語|問|問題)/);
+    let pages=0, rangeStart='', rangeEnd='', unit='ページ';
+    if(range){ rangeStart=Number(range[1]); rangeEnd=Number(range[2]); pages=Math.max(1,rangeEnd-rangeStart+1); unit=range[3]||(/単語/.test(raw)?'単語':'ページ'); }
+    else if(pagesMatch){ pages=Number(pagesMatch[1]); unit=pagesMatch[2]==='単語'?'単語':(pagesMatch[2]?.includes('問')?'問':'ページ'); }
+    if(pages>0){
+      const title=cleanSmartTitle(raw).replace(/(?:あと|残り)?\s*\d+\s*(ページ|頁|単語|問|問題)/g,'').trim() || cleanSmartTitle(raw);
+      actions.push({type:'task',taskType:'study',day,title,subject:inferSubjectFromText(raw),deadline:day,deadlineTime:times.length && /(まで|締切|期限)/.test(raw)?times.at(-1):'23:59',remainingPages:pages,rangeStart,rangeEnd,rangeUnit:unit,minutesPerPage:/単語/.test(unit)?0.5:3,deadlineStrict:/死守|絶対|今日中|明日まで|締切|期限/.test(raw),summary:`${title}：${pages}${unit}を${day} ${times.length && /(まで|締切|期限)/.test(raw)?times.at(-1):'23:59'}締切で追加`});
+    } else if(duration>0 && /(課題|レポート|作業|勉強|学習)/.test(raw)){
+      const title=cleanSmartTitle(raw) || 'AI入力タスク';
+      actions.push({type:'task',taskType:'general',day,title,subject:inferSubjectFromText(raw),deadline:day,deadlineTime:times.length && /(まで|締切|期限)/.test(raw)?times.at(-1):'23:59',remainingMinutes:duration,quantityText:`${duration}分`,deadlineStrict:/死守|絶対|今日中|明日まで|締切|期限/.test(raw),summary:`${title}：${duration}分タスクを${day}締切で追加`});
+    }
+  }
+  if(!actions.length) actions.push({type:'unknown',summary:'うまく解釈できませんでした。例：23:30から洗濯30分 / 明日までにIELTS20ページ / 今日は朝トレなし'});
+  return actions;
+}
+function smartInputCard(place='today'){
+  const id=`smartInput-${place}`;
+  return `<section class="card smart-input-card"><div class="row between"><div><p class="eyebrow">AI INPUT</p><h3>雑入力で追加</h3></div><span class="ai-local-badge">安全なローカル解釈</span></div><p class="muted">例：<strong>23:30から洗濯30分</strong> / <strong>明日までにIELTS20ページ</strong> / <strong>今日は朝トレなし</strong>。解釈してから確認して反映します。</p><textarea id="${id}" rows="3" placeholder="例：今日23:30から洗濯30分。明日までに世界遺産10ページ。"></textarea><div class="row smart-actions"><button type="button" class="primary small smart-parse" data-target="${id}" data-place="${place}">AIで解釈</button><button type="button" class="secondary small smart-clear" data-target="${id}" data-preview="${id}-preview">消す</button></div><div id="${id}-preview" class="smart-preview muted"></div></section>`;
+}
+let smartActionCache={};
+function renderSmartPreview(targetId, actions){
+  const key=targetId; smartActionCache[key]=actions;
+  const box=$(`${targetId}-preview`); if(!box)return;
+  box.innerHTML=actions.map((a,i)=>`<div class="smart-action ${a.type==='unknown'?'unknown':''}"><div><strong>${esc(a.summary)}</strong><small>${esc(a.type)}</small></div>${a.type==='unknown'?'':`<button type="button" class="primary small smart-apply" data-key="${esc(key)}" data-index="${i}">反映</button>`}</div>`).join('');
+  box.querySelectorAll('.smart-apply').forEach(b=>b.onclick=()=>applySmartAction(smartActionCache[b.dataset.key]?.[Number(b.dataset.index)]));
+}
+function attachSmartInputHandlers(){
+  document.querySelectorAll('.smart-parse').forEach(b=>b.onclick=()=>{ const target=b.dataset.target; const text=$(target)?.value||''; renderSmartPreview(target,parseSmartInputLocal(text,selectedDay)); recordOperation('ai_input_parsed','AI入力を解釈',{textLength:text.length,mode:'local'},selectedDay); persist(); });
+  document.querySelectorAll('.smart-clear').forEach(b=>b.onclick=()=>{ const input=$(b.dataset.target), prev=$(b.dataset.preview); if(input)input.value=''; if(prev)prev.innerHTML=''; });
+}
+function applySmartAction(action){
+  if(!action||action.type==='unknown')return;
+  if(action.type==='quickEvent'){
+    addQuickEventFromForm(action.day,{quickTitle:action.title,quickStart:action.startTime,quickEnd:action.endTime,quickDuration:action.durationMinutes,quickInputMode:action.inputMode,quickBuffer:action.bufferLevel});
+    recordOperation('ai_input_applied','AI入力から急な用事を反映',action,action.day); return;
+  }
+  if(action.type==='morningToggle'){ setMorningTrainingForDay(action.day,action.enabled); recordOperation('ai_input_applied','AI入力から自主練設定を反映',action,action.day); return; }
+  if(action.type==='sleep'){
+    const before=dailySleepPlans[action.day]||{}; dailySleepPlans[action.day]={...before,bedTime:action.bedTime||before.bedTime||settings.bedTime,nextWakeTime:action.nextWakeTime||before.nextWakeTime||settings.wakeTime,updatedAt:new Date().toISOString()};
+    recordOperation('ai_input_applied','AI入力から睡眠予定を反映',action,action.day); persist(); renderAll(); notice('AI入力から睡眠予定を反映して再計算しました。'); return;
+  }
+  if(action.type==='task'){
+    const obj=normalizeTask({id:uid(),taskType:action.taskType,title:action.title,subject:action.subject,deadline:action.deadline,deadlineTime:action.deadlineTime||'23:59',deadlineStrict:Boolean(action.deadlineStrict),startDate:selectedDay,priority:action.deadlineStrict?'high':'medium',focus:action.deadlineStrict?'main':'sub',mode:'grow',timePreference:'any',placement:'flexible',status:'active',rangeStart:action.rangeStart||undefined,rangeEnd:action.rangeEnd||undefined,rangeUnit:action.rangeUnit||'ページ',remainingPages:action.taskType==='study'?Number(action.remainingPages||1):undefined,initialPages:action.taskType==='study'?Number(action.remainingPages||1):undefined,baseMinutesPerPage:action.minutesPerPage||3,minutesPerPage:action.minutesPerPage||3,minPages:5,maxPages:30,remainingMinutes:action.taskType!=='study'?Number(action.remainingMinutes||30):undefined,initialMinutes:action.taskType!=='study'?Number(action.remainingMinutes||30):undefined,quantityText:action.quantityText||'',weeklyMultiplier:1,pace:'normal',learningDays:[]});
+    tasks.push(obj); recordOperation('ai_input_applied','AI入力から課題を追加',{taskId:obj.id,taskTitle:obj.title,taskType:obj.taskType,deadline:obj.deadline,deadlineTime:obj.deadlineTime,deadlineStrict:obj.deadlineStrict},obj.deadline); persist(); renderAll(); notice('AI入力から課題を追加して再計算しました。'); return;
+  }
+}
+
 function saveTodaySnapshot(plan, manualMode) {
   if (selectedDay !== dateKey()) return;
   const sleep=sleepPlanForDay(selectedDay);
@@ -518,14 +642,14 @@ function renderNow(){
   const todayTimelineHtml = nowTimelineMarkup(plan, dateKey(), nowMin);
   if (activeSession) {
     const elapsed = Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000));
-    $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen compact-focus"><p class="eyebrow">ACTIVE SESSION</p><h2>${esc(activeSession.title)}</h2><div class="focus-big">${activeSession.plannedPages ? `${activeSession.plannedPages}ページ` : activeSession.taskId ? minutesLabel(activeSession.plannedMinutes||0) : '生活タスク'}</div><p class="focus-timer" id="focusTimer">${minutesLabel(elapsed)}</p><div class="focus-actions"><button id="finishSession" class="primary">完了</button><button id="partialSession" class="secondary">途中終了</button><button id="cancelSession" class="ghost">中断（記録しない）</button></div><p class="muted">開始後はここだけ見ればOK。下に今日の流れも出ます。</p></div>${todayTimelineHtml}`;
-    $('finishSession').onclick=()=>finishActiveSession(false); $('partialSession').onclick=()=>finishActiveSession(true); $('cancelSession').onclick=()=>{ if(confirm('このセッションを記録せず中断しますか？')){const ended=new Date().toISOString(),session={...activeSession};recordOperation('session_cancelled','セッションを中断',{taskId:session.taskId||null,taskTitle:session.title,startedAt:session.startedAt,endedAt:ended,elapsedMinutes:Math.max(1,Math.round((Date.now()-new Date(session.startedAt))/60000))},session.day);activeSession=null;persist();renderNow();} };
+    $('nowTab').innerHTML = `${motivationHtml}${smartInputCard('now')}<div class="focus-screen compact-focus"><p class="eyebrow">ACTIVE SESSION</p><h2>${esc(activeSession.title)}</h2><div class="focus-big">${activeSession.plannedPages ? `${activeSession.plannedPages}ページ` : activeSession.taskId ? minutesLabel(activeSession.plannedMinutes||0) : '生活タスク'}</div><p class="focus-timer" id="focusTimer">${minutesLabel(elapsed)}</p><div class="focus-actions"><button id="finishSession" class="primary">完了</button><button id="partialSession" class="secondary">途中終了</button><button id="cancelSession" class="ghost">中断（記録しない）</button></div><p class="muted">開始後はここだけ見ればOK。下に今日の流れも出ます。</p></div>${todayTimelineHtml}`;
+    attachSmartInputHandlers(); $('finishSession').onclick=()=>finishActiveSession(false); $('partialSession').onclick=()=>finishActiveSession(true); $('cancelSession').onclick=()=>{ if(confirm('このセッションを記録せず中断しますか？')){const ended=new Date().toISOString(),session={...activeSession};recordOperation('session_cancelled','セッションを中断',{taskId:session.taskId||null,taskTitle:session.title,startedAt:session.startedAt,endedAt:ended,elapsedMinutes:Math.max(1,Math.round((Date.now()-new Date(session.startedAt))/60000))},session.day);activeSession=null;persist();renderNow();} };
     clearInterval(sessionTimer); sessionTimer=setInterval(()=>{ const el=$('focusTimer'); if(el&&activeSession) el.textContent=minutesLabel(Math.max(1,Math.round((Date.now()-new Date(activeSession.startedAt))/60000))); const clock=$('nowClockText'); if(clock) clock.textContent=hhmm(); },15000);
     return;
   }
   clearInterval(sessionTimer);
-  $('nowTab').innerHTML = `${motivationHtml}<div class="focus-screen compact-focus"><div class="row between focus-head"><p class="eyebrow">NEXT ACTION</p><div class="focus-now"><span>現在</span><strong>${hhmm()}</strong></div></div>${nextTask ? `<h2>${esc(nextTask.title)}</h2><div class="focus-big">${nextTask.pages ? `${nextTask.pages}ページ` : minutesLabel(nextTask.end-nextTask.start)}</div><p class="muted">${timeLabel(nextTask.start)}–${timeLabel(nextTask.end)}${nextTask.movable===false?' ・ 固定':''}</p><button id="startNext" class="primary focus-start">START</button>` : '<h2>今やる課題はありません</h2><p class="muted">今日の必要分が終わっているか、課題が未登録です。</p>'}</div>${todayTimelineHtml}`;
-  if($('startNext')) $('startNext').onclick=()=>startSession(nextTask);
+  $('nowTab').innerHTML = `${motivationHtml}${smartInputCard('now')}<div class="focus-screen compact-focus"><div class="row between focus-head"><p class="eyebrow">NEXT ACTION</p><div class="focus-now"><span>現在</span><strong>${hhmm()}</strong></div></div>${nextTask ? `<h2>${esc(nextTask.title)}</h2><div class="focus-big">${nextTask.pages ? `${nextTask.pages}ページ` : minutesLabel(nextTask.end-nextTask.start)}</div><p class="muted">${timeLabel(nextTask.start)}–${timeLabel(nextTask.end)}${nextTask.movable===false?' ・ 固定':''}</p><button id="startNext" class="primary focus-start">START</button>` : '<h2>今やる課題はありません</h2><p class="muted">今日の必要分が終わっているか、課題が未登録です。</p>'}</div>${todayTimelineHtml}`;
+  attachSmartInputHandlers(); if($('startNext')) $('startNext').onclick=()=>startSession(nextTask);
   document.querySelectorAll('.completeChallenge').forEach(b=>b.onclick=()=>completeChallenge(dateKey()));
   sessionTimer=setInterval(()=>renderNow(),60000);
 }
@@ -667,7 +791,7 @@ function renderToday(){
   const close=closeouts[selectedDay];
   const quickRows=quickEventsForDay(selectedDay).map(e=>{ const dur=Number(e.durationMinutes||Math.round((new Date(e.end)-new Date(e.start))/60000)||0); const crosses=dateKey(new Date(e.end))!==dateKey(new Date(e.start)); return `<div class="quick-event-row"><div><strong>${esc(e.title)}</strong><small>${String(e.start).slice(11,16)}–${String(e.end).slice(11,16)}${crosses?'（翌日）':''} ・ ${minutesLabel(dur)} ・ 余白${e.bufferLevel==='none'?'なし':e.bufferLevel==='small'?'小':e.bufferLevel==='medium'?'中':'大'}</small></div><button class="danger-outline small delete-quick-event" data-id="${esc(e.id)}">削除</button></div>`; }).join('');
   const quickEventCard=`<section class="card quick-event-card"><h3>急な用事を追加</h3><p class="muted">予定前・予定中・予定後のどのタイミングでも入力できます。時刻指定か、開始＋必要時間のどちらでも入れられます。保存すると、その時点で1日の計画を組み直します。</p><form id="quickEventForm" class="form-grid compact"><label class="span2">用事名<input name="quickTitle" placeholder="例：洗濯物・急な面談・買い物" required></label><label>入力方法<select name="quickInputMode" id="quickInputMode"><option value="range" selected>開始時刻＋終了時刻</option><option value="duration">開始時刻＋必要時間</option></select></label><label>開始<input name="quickStart" type="time" value="${hhmm()}"></label><label class="quick-range-field">終了<input name="quickEnd" type="time" value="${timeLabel(dayMinuteFromDate(new Date())+30)}"></label><label class="quick-duration-field hidden">必要時間<input name="quickDuration" type="number" min="1" max="1440" step="1" value="30"></label><label>前後余白<select name="quickBuffer"><option value="none" selected>なし</option><option value="small">小</option><option value="medium">中</option><option value="large">大</option></select></label><button class="primary small span2" type="submit">追加して再計算</button></form>${quickRows?`<div class="quick-event-list">${quickRows}</div>`:''}</section>`;
-  $('todayTab').innerHTML=`<div class="stack"><section class="hero-card"><div class="row between"><div><p class="eyebrow">TODAY</p><input id="dayPicker" class="date-input" type="date" value="${selectedDay}"></div><label class="mode-select-wrap">日モード<select id="dayModeSelect" class="mode-select ${plan.classDay?'class':''}"><option value="auto" ${manualMode==='auto'?'selected':''}>自動判定</option><option value="class" ${manualMode==='class'?'selected':''}>授業日</option><option value="noClass" ${manualMode==='noClass'?'selected':''}>授業なし日</option></select></label></div><div class="energy-row"><span>今日の状態</span><div class="segmented energy-select"><button data-energy="high" ${energyState==='high'?'class="selected"':''}>元気</button><button data-energy="normal" ${energyState==='normal'?'class="selected"':''}>普通</button><button data-energy="tired" ${energyState==='tired'?'class="selected"':''}>疲れ</button></div></div><div class="daily-routine-row"><span>今日の自主練</span><label class="switch-label"><input id="dailyMorningTrainingToggle" type="checkbox" ${morningTrainingEnabledForDay(selectedDay)?'checked':''}> この日に入れる</label></div><div class="metrics"><div><span>予定した課題量</span><strong>${Number(plan.scheduledTaskPages||0)}頁 / ${minutesLabel(plan.scheduledTaskMinutes||0)}</strong></div><div><span>ゆったり時間</span><strong>${minutesLabel(plan.relaxedMinutes)}</strong></div></div><div class="next-action"><p>NEXT ACTION</p>${close?'<h2>今日は運用終了</h2><strong>残りは自動で明日以降へ再計画されます</strong>':next?`<h2>${esc(next.title)}</h2><strong>${timeLabel(next.start)}–${timeLabel(next.end)}</strong>`:'<h2>今日はもう予定なし</h2>'}</div></section>${motivationToday}${morningAdjustHtml}<section class="card sleep-plan-card"><div class="row between"><div><p class="eyebrow">SLEEP PLAN</p><h3>今日の睡眠予定</h3></div><span class="sleep-duration">睡眠 ${minutesLabel(sleepMinutes)}</span></div><form id="dailySleepForm" class="form-grid"><label>今日の起床${sleep.actualWakeTime?'実績':'予定'}<input type="time" value="${sleep.actualWakeTime||sleep.plannedWakeTime}" disabled></label><label>今日の就寝予定<input type="time" name="bedTime" value="${sleep.bedTime}"></label><label>${tomorrow.slice(5).replace('-', '/')} の起床予定<input type="time" name="nextWakeTime" value="${sleep.nextWakeTime}"></label><div class="sleep-plan-note">${sleep.actualWakeTime?`起床予定 ${sleep.plannedWakeTime} ／ 実際 ${sleep.actualWakeTime}。今日の計画は実際の起床時刻から作成しています。`:`未来日の計画は起床予定 ${sleep.plannedWakeTime} から仮計算します。`} 就寝予定から、お風呂・肌ケアと作業可能時間も再計算します。</div><div class="span2 row"><button class="primary small">保存して再計算</button><button type="button" id="resetSleepPlan" class="secondary small">標準時刻に戻す</button>${selectedDay===dateKey()&&sleep.actualWakeTime?'<button type="button" id="editWakeTime" class="ghost small">起床時刻を修正</button>':''}</div></form></section>${riskHtml?`<section class="card"><h3>期限リスク</h3><div class="risk-list">${riskHtml}</div></section>`:''}${pending?`<section class="card"><h3>終日予定を確認</h3>${pending}</section>`:''}${bufferRows?`<section class="card"><h3>既存予定の前後余白</h3><p class="muted">予定本体は変えず、前後だけLife OS内で確保します。</p><div class="event-buffer-list">${bufferRows}</div></section>`:''}${quickEventCard}<section class="card"><h3>今日の達成予定</h3><div class="timeline">${timeline||'<p class="muted">予定・課題がまだありません。</p>'}</div><div class="relaxed-band">ゆったり時間　${minutesLabel(plan.relaxedMinutes)}</div>${!isNativeIOS()?'<button id="syncPlanCalendar" class="primary">Google Calendarへ同期（通知）</button>':''}</section><section class="card night-card"><h3>今日を終了する</h3>${close?`<p class="success-note">${new Date(close.closedAt).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})} に終了済み。残った課題は自動再計画対象です。</p>`:`<div class="check-list"><label><input id="closeBath" type="checkbox"> お風呂</label><label><input id="closeSkin" type="checkbox"> 肌ケア</label><label><input id="closePrep" type="checkbox"> 明日の準備</label></div><button id="closeDay" class="primary">今日の運用を終了</button><p class="muted">未完了ページは残量として保持され、明日以降の計画に自動で戻ります。</p>`}</section></div>`;
+  $('todayTab').innerHTML=`<div class="stack"><section class="hero-card"><div class="row between"><div><p class="eyebrow">TODAY</p><input id="dayPicker" class="date-input" type="date" value="${selectedDay}"></div><label class="mode-select-wrap">日モード<select id="dayModeSelect" class="mode-select ${plan.classDay?'class':''}"><option value="auto" ${manualMode==='auto'?'selected':''}>自動判定</option><option value="class" ${manualMode==='class'?'selected':''}>授業日</option><option value="noClass" ${manualMode==='noClass'?'selected':''}>授業なし日</option></select></label></div><div class="energy-row"><span>今日の状態</span><div class="segmented energy-select"><button data-energy="high" ${energyState==='high'?'class="selected"':''}>元気</button><button data-energy="normal" ${energyState==='normal'?'class="selected"':''}>普通</button><button data-energy="tired" ${energyState==='tired'?'class="selected"':''}>疲れ</button></div></div><div class="daily-routine-row"><span>今日の自主練</span><label class="switch-label"><input id="dailyMorningTrainingToggle" type="checkbox" ${morningTrainingEnabledForDay(selectedDay)?'checked':''}> この日に入れる</label></div><div class="metrics"><div><span>予定した課題量</span><strong>${Number(plan.scheduledTaskPages||0)}頁 / ${minutesLabel(plan.scheduledTaskMinutes||0)}</strong></div><div><span>ゆったり時間</span><strong>${minutesLabel(plan.relaxedMinutes)}</strong></div></div><div class="next-action"><p>NEXT ACTION</p>${close?'<h2>今日は運用終了</h2><strong>残りは自動で明日以降へ再計画されます</strong>':next?`<h2>${esc(next.title)}</h2><strong>${timeLabel(next.start)}–${timeLabel(next.end)}</strong>`:'<h2>今日はもう予定なし</h2>'}</div></section>${smartInputCard('today')}${motivationToday}${morningAdjustHtml}<section class="card sleep-plan-card"><div class="row between"><div><p class="eyebrow">SLEEP PLAN</p><h3>今日の睡眠予定</h3></div><span class="sleep-duration">睡眠 ${minutesLabel(sleepMinutes)}</span></div><form id="dailySleepForm" class="form-grid"><label>今日の起床${sleep.actualWakeTime?'実績':'予定'}<input type="time" value="${sleep.actualWakeTime||sleep.plannedWakeTime}" disabled></label><label>今日の就寝予定<input type="time" name="bedTime" value="${sleep.bedTime}"></label><label>${tomorrow.slice(5).replace('-', '/')} の起床予定<input type="time" name="nextWakeTime" value="${sleep.nextWakeTime}"></label><div class="sleep-plan-note">${sleep.actualWakeTime?`起床予定 ${sleep.plannedWakeTime} ／ 実際 ${sleep.actualWakeTime}。今日の計画は実際の起床時刻から作成しています。`:`未来日の計画は起床予定 ${sleep.plannedWakeTime} から仮計算します。`} 就寝予定から、お風呂・肌ケアと作業可能時間も再計算します。</div><div class="span2 row"><button class="primary small">保存して再計算</button><button type="button" id="resetSleepPlan" class="secondary small">標準時刻に戻す</button>${selectedDay===dateKey()&&sleep.actualWakeTime?'<button type="button" id="editWakeTime" class="ghost small">起床時刻を修正</button>':''}</div></form></section>${riskHtml?`<section class="card"><h3>期限リスク</h3><div class="risk-list">${riskHtml}</div></section>`:''}${pending?`<section class="card"><h3>終日予定を確認</h3>${pending}</section>`:''}${bufferRows?`<section class="card"><h3>既存予定の前後余白</h3><p class="muted">予定本体は変えず、前後だけLife OS内で確保します。</p><div class="event-buffer-list">${bufferRows}</div></section>`:''}${quickEventCard}<section class="card"><h3>今日の達成予定</h3><div class="timeline">${timeline||'<p class="muted">予定・課題がまだありません。</p>'}</div><div class="relaxed-band">ゆったり時間　${minutesLabel(plan.relaxedMinutes)}</div>${!isNativeIOS()?'<button id="syncPlanCalendar" class="primary">Google Calendarへ同期（通知）</button>':''}</section><section class="card night-card"><h3>今日を終了する</h3>${close?`<p class="success-note">${new Date(close.closedAt).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})} に終了済み。残った課題は自動再計画対象です。</p>`:`<div class="check-list"><label><input id="closeBath" type="checkbox"> お風呂</label><label><input id="closeSkin" type="checkbox"> 肌ケア</label><label><input id="closePrep" type="checkbox"> 明日の準備</label></div><button id="closeDay" class="primary">今日の運用を終了</button><p class="muted">未完了ページは残量として保持され、明日以降の計画に自動で戻ります。</p>`}</section></div>`;
   $('dayPicker').onchange=e=>{selectedDay=e.target.value;renderToday();};
   $('dayModeSelect').onchange=e=>{const before=dayModes[selectedDay]||'auto',after=e.target.value;if(after==='auto') delete dayModes[selectedDay]; else dayModes[selectedDay]=after;recordOperation('day_mode_changed','授業日モードを変更',{before,after},selectedDay);persist();renderToday();renderHistory();};
   if($('dailyMorningTrainingToggle')) $('dailyMorningTrainingToggle').onchange=e=>setMorningTrainingForDay(selectedDay,e.target.checked);
@@ -678,6 +802,7 @@ function renderToday(){
     form.onsubmit=e=>{e.preventDefault();addQuickEventFromForm(selectedDay,Object.fromEntries(new FormData(e.target).entries()));};
   }
   document.querySelectorAll('.delete-quick-event').forEach(b=>b.onclick=()=>deleteQuickEvent(b.dataset.id,selectedDay));
+  attachSmartInputHandlers();
   $('dailySleepForm').onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries()),before=dailySleepPlans[selectedDay]||null;dailySleepPlans[selectedDay]={bedTime:d.bedTime||settings.bedTime,nextWakeTime:d.nextWakeTime||settings.wakeTime,updatedAt:new Date().toISOString()};recordOperation('sleep_plan_saved','睡眠予定を変更',{before,after:{bedTime:dailySleepPlans[selectedDay].bedTime,nextWakeTime:dailySleepPlans[selectedDay].nextWakeTime}},selectedDay);persist();renderAll();notice('睡眠予定を保存して、今日と明日の計画を再計算しました。');};
   $('resetSleepPlan').onclick=()=>{const before=dailySleepPlans[selectedDay]||null;delete dailySleepPlans[selectedDay];recordOperation('sleep_plan_reset','睡眠予定を標準時刻へ戻す',{before,standardBedTime:settings.bedTime,standardNextWakeTime:settings.wakeTime},selectedDay);persist();renderAll();notice('この日の睡眠予定を標準時刻に戻しました。');};
   if($('editWakeTime')) $('editWakeTime').onclick=()=>editActualWakeTime(selectedDay);
