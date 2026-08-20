@@ -1,6 +1,6 @@
-import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage, dayMinuteFromClock, dayMinuteFromDate } from './scheduler.js?v=1.7';
+import { DEFAULT_SETTINGS, deepDefaults, dateKey, addDays, generateDayPlan, forecastDeadlineRisks, minutesLabel, timeLabel, toMinutes, taskMinutesPerPage, dayMinuteFromClock, dayMinuteFromDate } from './scheduler.js?v=1.7.1';
 
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.7.1';
 const DATA_SCHEMA_VERSION = 22;
 const DATA_KEYS = ['tasks','events','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
 const CLOUD_KEYS = ['tasks','overrides','settings','dayModes','dayStates','dailySleepPlans','wakeRecords','activityLog','operationLog','planSnapshots','ideas','closeouts','activeSession','semesters','classExceptions','motivation','calendarSources','morningTrainingOverrides','quickEvents'];
@@ -138,7 +138,7 @@ function initializeStorage() {
     if (Number(meta.schemaVersion||0) < 13) { if(!localStorage.getItem(K('morningTrainingOverrides'))) save('morningTrainingOverrides', {}); if(!localStorage.getItem(K('quickEvents'))) save('quickEvents', []); }
     if (Number(meta.schemaVersion||0) < 22) { const st=deepDefaults(load('settings', DEFAULT_SETTINGS)); save('settings', st); }
     // v1.6.6: Boss HPは残量がある限り最低1%として表示し、1頁残りなのに0%になる丸め誤差を防ぐ。データ移行なし。
-    // v1.6.9: AI入力アシスト。既存データ移行なし。
+    // v1.7.1: 実績量記録。既存データ移行なし。
     save('meta', { ...meta, appVersion:APP_VERSION, schemaVersion:DATA_SCHEMA_VERSION, upgradedAt:new Date().toISOString() });
   }
 }
@@ -682,7 +682,7 @@ function finishActiveSession(partial){
     const task=tasks.find(t=>t.id===activeSession.taskId);
     if(Number.isFinite(Number(task?.remainingPages))){
       const def=Math.min(Number(activeSession.plannedPages||task?.minPages||1),Number(task?.remainingPages||0));
-      const answer=prompt(partial?'実際に進んだページ数を入力':'完了したページ数を入力',String(def)); if(answer===null) return;
+      const answer=prompt(`${partial?'実際に進んだページ数を入力':'完了したページ数を入力'}\n予定：${Number(activeSession.plannedPages||0)}ページ / 残り：${Number(task?.remainingPages||0)}ページ`,String(def)); if(answer===null) return;
       pages=Math.max(0,Math.min(Number(task?.remainingPages||0),Number(answer||0))); if(pages<=0) return notice('1ページ以上を入力してください。');
     } else if(task) {
       completeTimeTask = partial ? false : confirm('このタスク自体は完了しましたか？\nOK＝完了、キャンセル＝まだ残りあり');
@@ -690,11 +690,11 @@ function finishActiveSession(partial){
   }
   const session={...activeSession}, endedAt=new Date().toISOString();
   const completionKey=session.planKey || (session.kind==='life' ? `life:${session.title}:${session.day}` : `session:${session.id}`);
-  recordCompletion({taskId:session.taskId,title:session.title,kind:session.kind,pages,minutes:elapsed,completeTimeTask,key:completionKey,source:'session',date:session.day});
+  recordCompletion({taskId:session.taskId,title:session.title,kind:session.kind,pages,minutes:elapsed,completeTimeTask,key:completionKey,source:'session',date:session.day,plannedPages:session.plannedPages,plannedMinutes:session.plannedMinutes});
   recordOperation(partial?'session_partial':'session_completed',partial?'作業を途中終了':'作業を完了',{sessionId:session.id,taskId:session.taskId,taskTitle:session.title,startedAt:session.startedAt,endedAt,pages,minutes:elapsed,completeTimeTask},session.day);
   activeSession=null; persist(); renderAll();
 }
-function recordCompletion({taskId,title,kind='task',pages=0,minutes=0,completeTimeTask=false,key,source='manual',date=selectedDay||dateKey()}){
+function recordCompletion({taskId,title,kind='task',pages=0,minutes=0,completeTimeTask=false,key,source='manual',date=selectedDay||dateKey(),plannedPages=0,plannedMinutes=0}){
   if(key && activityLog.some(a=>a.key===key)) return;
   let previousRemainingPages=null, afterRemainingPages=null, previousRemainingMinutes=null, afterRemainingMinutes=null;
   if(kind==='task'&&taskId){
@@ -716,13 +716,19 @@ function recordCompletion({taskId,title,kind='task',pages=0,minutes=0,completeTi
   const completedAt=new Date().toISOString();
   const logId=uid();
   const expGain = calcCompletionExp(kind, pages, minutes);
-  activityLog.unshift({id:logId,date,completedAt,kind,taskId:taskId||null,title,minutes:Number(minutes||0),pages:Number(pages||0),completeTimeTask:Boolean(completeTimeTask),key:key||uid(),source,expGain,previousRemainingPages,afterRemainingPages,previousRemainingMinutes,afterRemainingMinutes,reversible:true});
+  const plannedP = Math.max(0, Number(plannedPages || 0));
+  const plannedM = Math.max(0, Number(plannedMinutes || 0));
+  const extraPages = Math.max(0, Number(pages || 0) - plannedP);
+  const underPages = plannedP > 0 ? Math.max(0, plannedP - Number(pages || 0)) : 0;
+  activityLog.unshift({id:logId,date,completedAt,kind,taskId:taskId||null,title,minutes:Number(minutes||0),pages:Number(pages||0),plannedPages:plannedP,plannedMinutes:plannedM,extraPages,underPages,completeTimeTask:Boolean(completeTimeTask),key:key||uid(),source,expGain,previousRemainingPages,afterRemainingPages,previousRemainingMinutes,afterRemainingMinutes,reversible:true});
   awardExp(expGain, kind==='life'?'生活タスク完了':'作業完了',{activityId:logId,taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0)},date);
-  addVictory(kind==='life'?`${title}を回収`:`${title}を進めた`,{activityId:logId,taskId:taskId||null,pages:Number(pages||0),minutes:Number(minutes||0)},date);
+  addVictory(kind==='life'?`${title}を回収`:(extraPages>0?`${title}を予定より+${extraPages}ページ前倒し`:`${title}を進めた`),{activityId:logId,taskId:taskId||null,pages:Number(pages||0),plannedPages:plannedP,extraPages,minutes:Number(minutes||0)},date);
   const completedTask = taskId ? tasks.find(t=>t.id===taskId) : null;
   evaluateTitles(date,{taskCompleted:Boolean(completedTask && (Number(completedTask.remainingPages||0)<=0 || Number(completedTask.remainingMinutes||0)<=0 || completeTimeTask))});
   checkMissionBonus(date, planSnapshots[date]||currentPlan(date));
-  if(source!=='session') recordOperation(kind==='life'?'life_completed':'task_progress_recorded',kind==='life'?`${title}を完了`:'作業実績を記録',{activityId:logId,taskId:taskId||null,taskTitle:title,pages:Number(pages||0),minutes:Number(minutes||0),completeTimeTask:Boolean(completeTimeTask),source,completedAt,expGain},date);
+  if(extraPages>0) notice(`前倒し達成 +${extraPages}ページ。未来の負担を軽くしました。`);
+  else if(underPages>0) notice(`実績 ${Number(pages||0)}ページ。残り ${underPages}ページ分は再計画します。`);
+  if(source!=='session') recordOperation(kind==='life'?'life_completed':'task_progress_recorded',kind==='life'?`${title}を完了`:'作業実績を記録',{activityId:logId,taskId:taskId||null,taskTitle:title,pages:Number(pages||0),plannedPages:plannedP,extraPages,underPages,minutes:Number(minutes||0),plannedMinutes:plannedM,completeTimeTask:Boolean(completeTimeTask),source,completedAt,expGain},date);
   if(taskId) recomputeTaskSpeed(taskId);
   persist();
 }
@@ -824,10 +830,10 @@ function renderToday(){
   document.querySelectorAll('[data-energy]').forEach(b=>b.onclick=()=>{const before=dayStates[selectedDay]||'normal',after=b.dataset.energy;dayStates[selectedDay]=after;recordOperation('energy_changed','今日の状態を変更',{before,after},selectedDay);persist();renderToday();renderNow();});
   document.querySelectorAll('.done-btn').forEach(b=>b.onclick=()=>{
     const kind=b.dataset.kind, id=b.dataset.taskId, plannedPages=Number(b.dataset.pages||0), plannedMins=Number(b.dataset.mins||0);
-    if(kind==='life'){recordCompletion({kind:'life',title:b.dataset.title,minutes:plannedMins,key:b.dataset.key});renderAll();return;}
+    if(kind==='life'){recordCompletion({kind:'life',title:b.dataset.title,minutes:plannedMins,key:b.dataset.key,plannedMinutes:plannedMins});renderAll();return;}
     const task=tasks.find(t=>t.id===id); if(!task)return;
-    if(Number.isFinite(Number(task.remainingPages))){ let p=prompt('実際に進んだページ数',String(Math.min(plannedPages,Number(task.remainingPages||plannedPages)))); if(p===null)return; p=Math.max(0,Math.min(Number(task.remainingPages||0),Number(p||0))); if(!p)return notice('1ページ以上を入力してください。'); let m=prompt('実際にかかった時間（分）',String(plannedMins)); if(m===null)return; m=Math.max(1,Number(m||plannedMins)); recordCompletion({taskId:id,title:b.dataset.title,pages:p,minutes:m,key:b.dataset.key,source:'manual'}); }
-    else { let m=prompt('実際に作業した時間（分）',String(plannedMins)); if(m===null)return; m=Math.max(1,Number(m||plannedMins)); const complete=confirm('このタスクは完了しましたか？\nOK＝完了、キャンセル＝途中'); recordCompletion({taskId:id,title:b.dataset.title,minutes:m,completeTimeTask:complete,key:b.dataset.key,source:'manual'}); }
+    if(Number.isFinite(Number(task.remainingPages))){ const remain=Number(task.remainingPages||0); const def=Math.min(plannedPages||remain,remain); let p=prompt(`実際に進んだページ数\n予定：${plannedPages||0}ページ / 残り：${remain}ページ`,String(def)); if(p===null)return; p=Math.max(0,Math.min(remain,Number(p||0))); if(!p)return notice('1ページ以上を入力してください。'); let m=prompt(`実際にかかった時間（分）\n予定：${plannedMins}分 / 実績ページ：${p}ページ`,String(plannedMins)); if(m===null)return; m=Math.max(1,Number(m||plannedMins)); recordCompletion({taskId:id,title:b.dataset.title,pages:p,minutes:m,key:b.dataset.key,source:'manual',plannedPages,plannedMinutes:plannedMins}); }
+    else { let m=prompt('実際に作業した時間（分）',String(plannedMins)); if(m===null)return; m=Math.max(1,Number(m||plannedMins)); const complete=confirm('このタスクは完了しましたか？\nOK＝完了、キャンセル＝途中'); recordCompletion({taskId:id,title:b.dataset.title,minutes:m,completeTimeTask:complete,key:b.dataset.key,source:'manual',plannedMinutes:plannedMins}); }
     renderAll();
   });
   document.querySelectorAll('.undo-btn').forEach(b=>b.onclick=()=>undoCompletion(b.dataset.logId));
@@ -958,7 +964,7 @@ function renderHistory(){
   const recentOperations=operationLog.slice(0,200).map(op=>{const t=new Date(op.occurredAt);const stamp=Number.isNaN(t.getTime())?'':t.toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});const target=op.targetDate?` ・ 対象 ${esc(op.targetDate)}`:'';return `<div class="operation-entry"><time>${esc(stamp)}</time><div><strong>${esc(op.title)}</strong><small>${esc(op.type)}${target}</small></div></div>`;}).join('');
   const cards=dates.map(day=>{
     const snap=planSnapshots[day], wake=wakeRecords[day], logs=activityLog.filter(a=>a.date===day&&a.kind!=='closeout').sort((a,b)=>String(a.completedAt).localeCompare(String(b.completedAt))), pages=logs.filter(a=>a.kind==='task').reduce((sum,a)=>sum+Number(a.pages||0),0), close=closeouts[day];
-    const entries=logs.map(a=>`<div class="history-entry"><span>${a.kind==='life'?'生活':'作業'}</span><strong>${esc(a.title)}</strong><small>${a.pages?`${a.pages}ページ ・ `:''}${minutesLabel(a.minutes||0)}${Number(a.expGain||0)?` ・ +${Number(a.expGain||0)}EXP`:''}</small>${(a.kind==='task'||a.kind==='life')?`<button class="undo-btn history-undo" data-log-id="${esc(a.id)}">未完了に戻す</button>`:''}</div>`).join('');
+    const entries=logs.map(a=>{const diff=Number(a.extraPages||0)>0?` ・ 予定より+${Number(a.extraPages||0)}頁`:Number(a.underPages||0)>0?` ・ 未達${Number(a.underPages||0)}頁`:''; const planned=Number(a.plannedPages||0)>0?`予定${Number(a.plannedPages||0)}頁→`:''; return `<div class="history-entry"><span>${a.kind==='life'?'生活':'作業'}</span><strong>${esc(a.title)}</strong><small>${a.pages?`${planned}実績${a.pages}ページ ・ `:''}${minutesLabel(a.minutes||0)}${diff}${Number(a.expGain||0)?` ・ +${Number(a.expGain||0)}EXP`:''}</small>${(a.kind==='task'||a.kind==='life')?`<button class="undo-btn history-undo" data-log-id="${esc(a.id)}">未完了に戻す</button>`:''}</div>`;}).join('');
     const mode=snap?`${snap.classDay?'授業日':'授業なし日'} ・ ${snap.energyState==='high'?'元気':snap.energyState==='tired'?'疲れ':'普通'}`:'計画未作成';
     const wakeText=wake?.wakeTime?` ・ 起床実績 ${wake.wakeTime}${wake.plannedWakeTime?`（予定 ${wake.plannedWakeTime}）`:''}`:'';
     const sleepText=snap?.bedTime?` ・ 就寝予定 ${snap.bedTime} → 翌朝 ${snap.nextWakeTime||settings.wakeTime}`:'';
