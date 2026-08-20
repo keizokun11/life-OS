@@ -20,6 +20,11 @@ export const DEFAULT_SETTINGS = {
     breakfastMinutes: 15,
     autoAdjustForMorningEvent: true,
   },
+  meals: {
+    breakfast: { enabled: true, minutes: 15 },
+    lunch: { enabled: true, time: '12:30', minutes: 30 },
+    dinner: { enabled: true, time: '19:00', minutes: 40 },
+  },
   relaxedMinMinutes: 90,
   relaxedRatio: 0.20,
   deadlineStrictRelaxedMinMinutes: 30,
@@ -62,6 +67,13 @@ export function deepDefaults(saved = {}) {
     morningTraining: {
       ...DEFAULT_SETTINGS.morningTraining,
       ...(saved.morningTraining || {}),
+    },
+    meals: {
+      ...DEFAULT_SETTINGS.meals,
+      ...(saved.meals || {}),
+      breakfast: { ...DEFAULT_SETTINGS.meals.breakfast, ...(saved.meals?.breakfast || {}) },
+      lunch: { ...DEFAULT_SETTINGS.meals.lunch, ...(saved.meals?.lunch || {}) },
+      dinner: { ...DEFAULT_SETTINGS.meals.dinner, ...(saved.meals?.dinner || {}) },
     },
     buffers: {
       ...DEFAULT_SETTINGS.buffers,
@@ -326,6 +338,35 @@ function fixedTaskItems(tasks, day) {
     .filter(Boolean);
 }
 
+function mealScheduleItems(settings, wake, bed, morningRoutineEnd = wake) {
+  const meals = settings.meals || DEFAULT_SETTINGS.meals;
+  const items = [];
+  const breakfastEnabled = meals.breakfast?.enabled !== false && settings.morningTraining?.breakfastEnabled === false;
+  if (breakfastEnabled) {
+    const mins = Math.max(0, Number(meals.breakfast?.minutes ?? 15));
+    if (mins > 0) {
+      const start = Math.max(wake, morningRoutineEnd);
+      if (start < bed) items.push({ type: 'life', title: '朝食', start, end: Math.min(start + mins, bed), movable: false, routineGroup: 'meal', routineKey: 'breakfast' });
+    }
+  }
+  for (const [key, label] of [['lunch','昼食'], ['dinner','夕食']]) {
+    const m = meals[key] || {};
+    if (m.enabled === false) continue;
+    const mins = Math.max(0, Number(m.minutes || 0));
+    if (mins <= 0) continue;
+    let start = dayMinuteFromClock(m.time || (key === 'lunch' ? '12:30' : '19:00'));
+    let end = start + mins;
+    // 起床〜就寝の外にある食事は、その日の計画からは外す。
+    // ただし一部でも起床〜就寝に重なる場合は、重なる部分を固定予定として扱う。
+    const clippedStart = Math.max(start, wake);
+    const clippedEnd = Math.min(end, bed);
+    if (clippedEnd - clippedStart >= 5) {
+      items.push({ type: 'life', title: label, start: clippedStart, end: clippedEnd, movable: false, routineGroup: 'meal', routineKey: key });
+    }
+  }
+  return items;
+}
+
 export function generateDayPlan({ day, tasks, events, overrides, settings, classDayOverride = 'auto', energyState = 'normal' }) {
   settings = deepDefaults(settings);
   const dayEvents = eventsForDay(events || [], day);
@@ -370,6 +411,7 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
   // Morning training starts from the actual wake time. If a morning event/buffer is too close,
   // Life OS shortens the routine automatically instead of letting training make the user late.
   const morningRoutine = [];
+  let morningRoutineEnd = wake;
   let morningAdjustment = null;
   if (settings.morningTraining?.enabled !== false) {
     const mt = settings.morningTraining || {};
@@ -443,6 +485,13 @@ export function generateDayPlan({ day, tasks, events, overrides, settings, class
       busyForWork.push({ start: item.start, end: item.end });
       cursor = item.end;
     }
+    morningRoutineEnd = cursor;
+  }
+
+  const mealItems = mealScheduleItems(settings, wake, bed, morningRoutineEnd);
+  for (const item of mealItems) {
+    fixedCore.push(item);
+    busyForWork.push({ start: item.start, end: item.end });
   }
 
   const bathEnd = bed - Number(settings.bathBeforeBedMinutes || 90);
